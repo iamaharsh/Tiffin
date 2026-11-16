@@ -1,0 +1,74 @@
+name: release
+
+# A version tag (git tag -a v0.2.0 -m "notes") builds, tests, signs and publishes the installer.
+on:
+  push:
+    tags: ['v*']
+
+# Actions are pinned to full commit SHAs (the trailing comment is the version). Let Dependabot or Renovate bump them.
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The checkout may hold only the commit; fetch the tag object so its message can be the release notes.
+      - name: Release notes from the tag message
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          {
+            echo 'body<<TIFFIN_NOTES_END'
+            git for-each-ref "refs/tags/${TAG}" --format='%(contents)'
+            echo 'TIFFIN_NOTES_END'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Tag and versions agree
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node desktop/tools/check-versions.mjs "$TAG"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            desktop/src-tauri -> target
+            app -> target
+
+      - name: Install front end packages
+        run: npm ci
+        working-directory: desktop
+
+      - name: Tests gate the release
+        run: |
+          cargo test --manifest-path app/Cargo.toml
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: v__VERSION__
+          releaseName: 'Tiffin v__VERSION__'
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --config src-tauri/tauri.release.conf.json

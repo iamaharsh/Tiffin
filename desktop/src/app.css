@@ -1,0 +1,200 @@
+/* Tiffin, web interface. Warm cream and cocoa neutrals, one terracotta for anything pressable, ten
+   spice label colours that follow each recipe, and vivid section tiles in the sidebar. */
+
+@font-face {
+  font-family: 'Barlow Condensed';
+  src: url('./assets/fonts/BarlowCondensed-SemiBold.ttf') format('truetype');
+  font-weight: 600;
+  font-display: block;
+}
+
+:root {
+  color-scheme: light dark;
+
+  /* surfaces */
+  --sidebar: #f3e9da;
+  --sidebar-hover: rgba(60, 45, 30, 0.06);
+  --page: #fff6e9;
+  --card: #fffcf6;
+  --well: #f3ede3;
+  --toolbar: rgba(255, 246, 233, 0.78);
+  --rule: rgba(40, 30, 20, 0.09);
+  --rule-strong: rgba(40, 30, 20, 0.16);
+
+  /* text */
+  --ink: #2b2118;
+  --ink-2: #5a4c3f;
+  --ink-3: #6e5e50; /* ≥ 4.5:1 on every light surface */
+
+  /* the one action colour */
+  --accent: #b04630;
+  --accent-press: #963a27;
+  --accent-text: #a94530;
+  --accent-wash: #fbe3d8;
+  --focus-ring: #b04630; /* the solid 2px keyboard outline */
+  --focus: color-mix(in srgb, var(--focus-ring) 25%, transparent); /* the soft halo on fields */
+
+  /* brand: the logo colour only (never text), olive only for the leaf and "up to date" */
+  --brand: #c8553d;
+  --leaf: #6b7a3a;
+  --olive-text: #5e6c31;
+  --pill: #fffcf6;
+
+  /* the toast is dark in both modes, so these two are not overridden in the dark block */
+  --toast-ok: #9cae5c;
+  --toast-act: #e8806a;
+
+  /* state */
+  --heart: #c22844;
+  --star: #e09a12;
+  --star-off: #dcd6ce;
+  --ok: #1f7a45;
+  --warn: #8a5700;
+  --warn-wash: #fbebcb;
+
+  /* section tiles (white icon on top) */
+  --tile-recipes: #e4572e;
+  --tile-browser: #2f7de1;
+  --tile-groceries: #2e9e5b;
+  --tile-pantry: #c98500;
+  --tile-foods: #6a9a1f;
+  --tile-meals: #8e5bd9;
+  --tile-menus: #d6336c;
+
+  /* macros */
+  --protein: #2f7de1;
+  --carbs: #d99400;
+  --fat: #e4572e;
+
+  /* label colours: saffron, paprika, sage, indigo, cinnamon, sumac, plum, pepper, ocean, olive */
+  --l0: #8a5c00; --l1: #b04014; --l2: #4c7022; --l3: #2e4f8a; --l4: #76482c;
+  --l5: #8a2a60; --l6: #5e3a82; --l7: #4a5560; --l8: #146896; --l9: #66620e;
+  --l-none: #665e58;
+  --label-lift: 0%;
+
+  /* depth: only floating things cast shadows */
+  --shadow-card: 0 1px 2px rgba(40, 25, 10, 0.06), 0 2px 8px rgba(40, 25, 10, 0.05);
+  --shadow-lift: 0 2px 4px rgba(40, 25, 10, 0.06), 0 12px 28px rgba(40, 25, 10, 0.14);
+  --shadow-float: 0 8px 24px rgba(20, 12, 4, 0.18), 0 1px 3px rgba(20, 12, 4, 0.1);
+
+  /* motion: one ease for settling, one spring-ish overshoot for delight */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  --font-text: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  --font-label: 'Barlow Condensed', 'Segoe UI', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sidebar: #211810;
+    --sidebar-hover: rgba(255, 240, 225, 0.06);
+    --page: #2b2118;
+    --card: #382b20;
+    --well: #33271d;
+    --toolbar: rgba(43, 33, 24, 0.78);
+    --rule: rgba(255, 240, 225, 0.08);
+    --rule-strong: rgba(255, 240, 225, 0.15);
+    --ink: #fff6e9;
+    --ink-2: #c9bba8;
+    --ink-3: #a89a87; /* ≥ 4.5:1 on every dark surface */
+    --accent-text: #e8806a;
+    --accent-wash: #4a2a20;
+    --focus-ring: #e8806a;
+    --brand: #fff6e9; /* one-colour rule for dark */
+    --leaf: #9cae5c;
+    --olive-text: #9cae5c;
+    --pill: #4a3b2d;
+    --heart: #ff5c74;
+    --star-off: #4a4541;
+    --ok: #5cc98a;
+    --warn: #e4a850;
+    --warn-wash: #4a3716;
+    --label-lift: 45%;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.3), 0 12px 28px rgba(0, 0, 0, 0.4);
+    --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--page);
+  color: var(--ink);
+  font: 14.5px/1.45 var(--font-text);
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+#app { height: 100%; }
+
+/* Windows 11 Mica (html.mica is set once the backdrop is on): the sidebar lets it through, the
+   page stays solid. Without Mica, or with reduced transparency, everything stays opaque. */
+@media not (prefers-reduced-transparency: reduce) {
+  html.mica, html.mica body { background: transparent; }
+}
+
+* { scrollbar-width: thin; scrollbar-color: var(--rule-strong) transparent; }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* a recipe's own text can be selected and copied */
+.selectable { -webkit-user-select: text; user-select: text; cursor: auto; }
+
+/* Label colour for anything inside: set --l on the element. Text uses the lifted version so it
+   keeps contrast on the dark theme; fills keep the stored colour. */
+.label-scope { --l-text: color-mix(in srgb, var(--l), white var(--label-lift)); }
+
+.caps {
+  font-family: var(--font-label);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.num { font-family: var(--font-label); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* visually hidden, still read by screen readers */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* view transition: a recipe photo grows out of its card and back */
+::view-transition-group(hero) {
+  animation-duration: 420ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+::view-transition-old(hero), ::view-transition-new(hero) {
+  height: 100%;
+  object-fit: cover;
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) { animation: 160ms ease-out both vt-fade-out; }
+::view-transition-new(root) { animation: 260ms var(--ease-out) 60ms both vt-fade-in; }
+@keyframes vt-fade-out { to { opacity: 0; } }
+@keyframes vt-fade-in { from { opacity: 0; transform: translateY(6px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}

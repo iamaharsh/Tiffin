@@ -1,0 +1,38 @@
+# Build output and packages
+target/
+node_modules/
+dist/
+dist-ssr/
+*.log
+
+# Tool output and local usage records
+craft.json
+feed.json
+usage.json
+
+# Working notes, third-party material and local state
+/referenceImages/
+/reference/
+/checks/
+/investigation.cany/
+/pinned/
+/capture/
+/logo-concepts/
+/inbox/
+/.impeccable/
+
+# Logo files, ignored until someone decides to track them
+/Tiffin*.png
+
+# Screenshots from the classic --screenshot flag (goes away with the egui app)
+/app/shots/*.png
+
+# updater signing keys never enter the repo (the public .pub is fine)
+*.key
+
+# Local Claude settings
+.claude/settings.local.json
+
+# GSD tool state, regenerated on every run
+/.planning/state.json
+__pycache__/

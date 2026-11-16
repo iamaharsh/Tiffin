@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Tiffin icon master: stacked terracotta tins with clasps on a cream tile (refined concept A). -->
+  <rect x="64" y="64" width="896" height="896" rx="210" fill="#F9E8CE" stroke="#E3C79B" stroke-width="10" />
+  <g transform="translate(0 -30)">
+    <path d="M300 850 V270 Q300 205 365 205 H659 Q724 205 724 270 V850" fill="none" stroke="#C8553D" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" />
+    <g fill="#C8553D" stroke="#F9E8CE" stroke-width="12" stroke-linejoin="round">
+      <path d="M346 700 V850 A166 34 0 0 0 678 850 V700 A166 34 0 0 0 346 700 Z" />
+      <path d="M346 550 V700 A166 34 0 0 0 678 700 V550 A166 34 0 0 0 346 550 Z" />
+      <path d="M346 400 V550 A166 34 0 0 0 678 550 V400 A166 34 0 0 0 346 400 Z" />
+    </g>
+    <g fill="#C8553D">
+      <rect x="278" y="533" width="68" height="34" rx="9" /><rect x="678" y="533" width="68" height="34" rx="9" />
+      <rect x="278" y="683" width="68" height="34" rx="9" /><rect x="678" y="683" width="68" height="34" rx="9" />
+    </g>
+  </g>
+</svg>
