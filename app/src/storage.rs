@@ -435,12 +435,17 @@ impl Store {
     }
 
     /// Protect the library across app updates: keep a snapshot of the old one.
-    fn after_load(&mut self, mut lib: Library) -> Library {
+    /// `persist` saves the bumped library on the main load path; the `.bak` recovery path saves it itself.
+    fn after_load(&mut self, mut lib: Library, persist: bool) -> Library {
         if (lib.app_version != APP_VERSION || lib.format < LIBRARY_FORMAT) && !self.read_only {
             // no upgrade without its snapshot (the old file couldn't be brought back); the next start tries again
             if self.snapshot(&lib, &format!("before update from {}", lib.app_version)).is_ok() {
                 lib.app_version = APP_VERSION.into();
                 lib.format = LIBRARY_FORMAT;
+                // written now so the next start sees the new version and takes no second snapshot; save keeps the old file as .bak
+                if persist {
+                    let _ = self.save(&lib);
+                }
             }
         }
         lib
@@ -466,7 +471,7 @@ impl Store {
         let main_missing = match read_library(&main) {
             Read::Ok(lib) => {
                 self.written = stamp_of(&main);
-                return LoadOutcome::Loaded { lib: self.after_load(lib) };
+                return LoadOutcome::Loaded { lib: self.after_load(lib, true) };
             }
             Read::TooNew { lib, found, partial } => return self.too_new(lib, found, partial), // never read or touch the .bak
             Read::Missing => true,
@@ -478,7 +483,7 @@ impl Store {
         }
         match read_library(&bak) {
             Read::Ok(lib) if main_missing || main_copy.is_some() => {
-                let lib = self.after_load(lib);
+                let lib = self.after_load(lib, false);
                 if !self.read_only {
                     // The gate sees the copied stamp: the damaged file is overwritten without rotation, never before its copy.
                     let _ = self.save(&lib);
@@ -550,7 +555,15 @@ impl Store {
         let text = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
         let dir = history_dir(&self.dir);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        write_atomic(&dir.join(format!("snapshot-{}.json", t)), text.as_bytes(), false)?;
+        // never overwrite a snapshot: a second one in the same second gets -1, -2, ...
+        let mut path = dir.join(format!("snapshot-{}.json", t));
+        for n in 1.. {
+            if !path.exists() {
+                break;
+            }
+            path = dir.join(format!("snapshot-{}-{}.json", t, n));
+        }
+        write_atomic(&path, text.as_bytes(), false)?;
         self.prune(lib.settings.snapshots_to_keep.max(5));
         Ok(())
     }
@@ -567,7 +580,8 @@ impl Store {
     fn prune(&self, keep: usize) {
         let mut list = self.snapshots();
         if list.len() > keep {
-            list.sort_by_key(|s| s.taken);
+            // same second: shorter name first, so snapshot-5 is older than snapshot-5-1 and snapshot-5-2 than snapshot-5-10
+            list.sort_by_key(|s| (s.taken, s.path.as_os_str().len(), s.path.clone()));
             for s in &list[..list.len() - keep] {
                 let _ = fs::remove_file(&s.path);
             }
@@ -1489,11 +1503,61 @@ mod tests {
         let LoadOutcome::Loaded { lib } = Store::new(d.clone(), false).load() else { panic!("expected Loaded") };
         assert_eq!((lib.format, lib.app_version.as_str()), (1, "0.0.1"));
         assert_eq!(fs::read(main_of(&d)).unwrap(), FORMAT1.as_bytes());
+        assert!(!bak_of(&d).exists(), "no .bak while the snapshot failed");
         fs::remove_file(d.join("history")).unwrap();
         let mut st = Store::new(d.clone(), false);
         let LoadOutcome::Loaded { lib } = st.load() else { panic!("expected Loaded") };
         assert_eq!((lib.format, lib.app_version.as_str()), (LIBRARY_FORMAT, APP_VERSION));
         assert!(st.snapshots().iter().any(|s| s.reason.starts_with("before update from")));
+        let on_disk: Library = serde_json::from_str(&fs::read_to_string(main_of(&d)).unwrap()).unwrap();
+        assert_eq!((on_disk.format, on_disk.app_version.as_str()), (LIBRARY_FORMAT, APP_VERSION));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn update_snapshot_is_taken_once() {
+        let d = tdir("once");
+        fs::write(main_of(&d), FORMAT1).unwrap();
+        let mut st = Store::new(d.clone(), false);
+        st.load();
+        let on_disk: Library = serde_json::from_str(&fs::read_to_string(main_of(&d)).unwrap()).unwrap();
+        assert_eq!((on_disk.format, on_disk.app_version.as_str()), (LIBRARY_FORMAT, APP_VERSION));
+        let old: Library = serde_json::from_str(&fs::read_to_string(bak_of(&d)).unwrap()).unwrap();
+        assert_eq!(old.app_version, "0.0.1", "the old file is kept as .bak");
+        let taken = |s: &Store| s.snapshots().iter().filter(|x| x.reason == "before update from 0.0.1").count();
+        assert_eq!(taken(&st), 1);
+        // a second start: asserted on last_snapshot, because same-second snapshots share a file name
+        let mut again = Store::new(d.clone(), false);
+        again.load();
+        assert_eq!(again.last_snapshot, 0);
+        assert_eq!(taken(&again), 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn same_second_snapshots_never_overwrite() {
+        let d = tdir("samesec");
+        let mut st = Store::new(d.clone(), false);
+        let lib = good(1);
+        for i in 0..5 {
+            st.snapshot(&lib, &format!("reason {i}")).unwrap();
+        }
+        let files = fs::read_dir(d.join("history")).unwrap().count();
+        assert_eq!(files, 5, "five snapshots, five files, even when taken in the same second");
+        let mut reasons: Vec<String> = st.snapshots().into_iter().map(|s| s.reason).collect();
+        reasons.sort();
+        assert_eq!(reasons, (0..5).map(|i| format!("reason {i}")).collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_only_load_bumps_nothing() {
+        let d = tdir("roload");
+        fs::write(main_of(&d), FORMAT1).unwrap();
+        let LoadOutcome::Loaded { lib } = Store::new(d.clone(), true).load() else { panic!("expected Loaded") };
+        assert_eq!((lib.format, lib.app_version.as_str()), (1, "0.0.1"));
+        assert_eq!(fs::read(main_of(&d)).unwrap(), FORMAT1.as_bytes());
+        assert!(!bak_of(&d).exists() && !d.join("history").exists());
         let _ = fs::remove_dir_all(&d);
     }
 

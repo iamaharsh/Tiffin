@@ -81,13 +81,21 @@ fn snapshot_first(state: &Shared, version: &str) -> Result<(), String> {
     st.store.snapshot(&st.lib, &format!("before update to {version}")).map_err(|_| SNAPSHOT_FAILED.to_string())
 }
 
-/// Back up the library, then download, verify (minisign, against the key compiled into the app) and run the installer.
-/// On Windows the process exits inside `download_and_install` and the installer relaunches Tiffin.
+/// The gate runs after the download, right before the installer, so a failed download leaves no snapshot.
+fn after_download<B>(state: &Shared, version: &str, downloaded: Result<B, String>, install: impl FnOnce(B) -> Result<(), String>) -> Result<(), String> {
+    let bytes = downloaded?;
+    snapshot_first(state, version)?;
+    install(bytes)
+}
+
+/// Check, download and verify (minisign, against the key compiled into the app), then the gate (no open edit, a real
+/// snapshot), then the installer. The gate sits after the download so a draft opened meanwhile still blocks the install.
+/// On Windows the process exits inside `Update::install` and the installer relaunches Tiffin.
 #[tauri::command]
 pub(crate) async fn install_update(app: tauri::AppHandle, state: tauri::State<'_, Shared>) -> Result<(), String> {
     let Some(update) = updater(&app)?.check().await.map_err(|e| reason(&e))? else { return Err(UP_TO_DATE.into()) };
-    snapshot_first(&state, &update.version)?;
-    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| reason(&e))
+    let downloaded = update.download(|_, _| {}, || {}).await.map_err(|e| reason(&e));
+    after_download(&state, &update.version, downloaded, |bytes| update.install(bytes).map_err(|e| reason(&e)))
 }
 
 #[cfg(test)]
@@ -148,5 +156,44 @@ mod tests {
         shared.lock().unwrap().store.read_only = true;
         assert_eq!(snapshot_first(&shared, "9.9.9"), Err(SNAPSHOT_FAILED.to_string()));
         assert_eq!(updates_taken(&shared), 0);
+    }
+
+    #[test]
+    fn gate_runs_after_the_download() {
+        use std::cell::Cell;
+        // failed download: its own text, no install, no snapshot
+        let shared = Mutex::new(crate::load_state(tdir("dl-fail")));
+        let ran = Cell::new(false);
+        let r = after_download(&shared, "9.9.9", Err::<Vec<u8>, _>(NO_CONNECTION.to_string()), |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Err(NO_CONNECTION.to_string()));
+        assert!(!ran.get());
+        assert_eq!(updates_taken(&shared), 0);
+        // a draft opened during the download: refused, no install, no snapshot
+        let shared = Mutex::new(crate::load_state(tdir("dl-draft")));
+        shared.lock().unwrap().unsaved = true;
+        let r = after_download(&shared, "9.9.9", Ok(vec![1u8]), |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Err(UNSAVED.to_string()));
+        assert!(!ran.get());
+        assert_eq!(updates_taken(&shared), 0);
+        // normal: the snapshot exists before the installer runs, and gets the downloaded bytes
+        let shared = Mutex::new(crate::load_state(tdir("dl-ok")));
+        let r = after_download(&shared, "9.9.9", Ok(vec![1u8, 2]), |bytes| {
+            assert_eq!(bytes, vec![1u8, 2]);
+            assert_eq!(updates_taken(&shared), 1);
+            ran.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Ok(()));
+        assert!(ran.get());
+        // an installer error comes back unchanged
+        let shared = Mutex::new(crate::load_state(tdir("dl-inst")));
+        let r = after_download(&shared, "9.9.9", Ok(()), |_| Err(BLOCKED.to_string()));
+        assert_eq!(r, Err(BLOCKED.to_string()));
     }
 }

@@ -1050,13 +1050,13 @@ mod tests {
         assert!(r.nutrition.as_ref().is_some_and(|n| n.calories.is_some_and(|c| c > 0.0)));
         assert_eq!(st.lib.nutrition_estimator, nutrition::ESTIMATOR_VERSION);
         assert_eq!(r.modified, 1234, "modified is left alone");
-        let snaps = st.store.snapshots();
-        assert_eq!(snaps.len(), 1, "one snapshot before the update");
-        assert_eq!(snaps[0].reason, "before updating nutrition estimates");
+        // counted by reason: the test's own first save also snapshots, and same-second snapshots no longer overwrite each other
+        let before = |s: &AppState| s.store.snapshots().iter().filter(|x| x.reason == "before updating nutrition estimates").count();
+        assert_eq!(before(&st), 1, "one snapshot before the update");
         // second start: nothing to redo, no second snapshot
         let again = load_state(d.clone());
         assert_eq!(again.lib.nutrition_estimator, nutrition::ESTIMATOR_VERSION);
-        assert_eq!(again.store.snapshots().len(), 1);
+        assert_eq!(before(&again), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 
