@@ -1,6 +1,5 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import Logo from './Logo.svelte';
   import { labelVar, type Overview, type Section } from './api';
 
   let {
@@ -17,11 +16,14 @@
   } = $props();
 
   const sections: [Section, string, string][] = [
+    ['diary', 'Diary', 'list'],
+    ['targets', 'Targets', 'target'],
+    ['body', 'Body', 'trend'],
     ['recipes', 'Recipes', 'book'],
     ['groceries', 'Groceries', 'cart'],
     ['pantry', 'Pantry', 'jar'],
     ['foods', 'Foods', 'flame'],
-    ['meals', 'Meals', 'calendar'],
+    ['meals', 'Meal Plan', 'calendar'],
     ['menus', 'Menus', 'menu'],
     ['browser', 'Browser', 'globe'],
   ];
@@ -40,7 +42,6 @@
 </script>
 
 <nav class="sidebar" aria-label="Main">
-  <div class="brand"><Logo width={120} /></div>
   <ul class="sections">
     {#each sections as [id, name, icon]}
       <li>
@@ -152,7 +153,6 @@
   @media not (prefers-reduced-transparency: reduce) {
     :global(html.mica) .sidebar { background: color-mix(in srgb, var(--sidebar) 62%, transparent); }
   }
-  .brand { padding: 12px; } /* clear space = the handle width */
   ul { list-style: none; margin: 0; padding: 0 10px; }
   .sections { padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
   .scroll { flex: 1; overflow-y: auto; padding-bottom: 16px; scrollbar-width: thin; }

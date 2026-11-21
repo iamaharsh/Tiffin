@@ -2,6 +2,10 @@
 //! from the `recipe_box` crate through the commands below.
 
 mod foods;
+mod body;
+mod diary;
+mod exercise;
+mod goals;
 mod grocery;
 mod importing;
 mod meals;
@@ -50,7 +54,7 @@ struct Overview {
     pinned: Vec<Pinned>,
     /// grocery list names, for "Add to Grocery List"
     lists: Vec<String>,
-    /// days since 1970-01-01, for the meal plan
+    /// the viewer's local calendar day as days since 1970-01-01, the number the diary compares Meal.day with (never `model::today()`, the UTC day)
     today: i32,
     /// why the library can't be changed right now (damaged file); shown as a permanent banner
     locked: Option<String>,
@@ -231,8 +235,11 @@ fn card(lib: &Library, r: &Recipe) -> Card {
 }
 
 #[tauri::command]
-fn overview(state: tauri::State<Shared>) -> Overview {
-    let s = state.lock().unwrap();
+fn overview(state: tauri::State<Shared>, today: String) -> Result<Overview, String> {
+    overview_of(&state.lock().unwrap(), &today)
+}
+
+fn overview_of(s: &AppState, today: &str) -> Result<Overview, String> {
     let live: Vec<&Recipe> = s.lib.recipes.iter().filter(|r| !r.in_trash).collect();
     let mut paths = s.lib.categories.clone();
     paths.sort_by_key(|p| p.to_lowercase());
@@ -247,7 +254,7 @@ fn overview(state: tauri::State<Shared>) -> Overview {
         })
         .collect();
     let n = |f: &dyn Fn(&Recipe) -> bool| live.iter().filter(|r| f(r)).count();
-    Overview {
+    Ok(Overview {
         sort: s.lib.settings.recipe_sort,
         categories,
         counts: [
@@ -260,9 +267,9 @@ fn overview(state: tauri::State<Shared>) -> Overview {
         ],
         pinned: live.iter().filter(|r| r.pinned).map(|r| Pinned { id: r.id, name: r.name.clone() }).collect(),
         lists: s.lib.grocery_lists.iter().map(|l| l.name.clone()).collect(),
-        today: model::today(),
+        today: tracker::diary::day_number(today)?,
         locked: s.store.problem.as_ref().map(|p| p.banner()),
-    }
+    })
 }
 
 /// `view`: all | recent | top | favorites | uncategorized | trash | cat:<path>.
@@ -382,14 +389,17 @@ pub(crate) fn mutate_keeping_undo<T>(state: &Shared, f: impl FnOnce(&mut AppStat
 
 /// Change the diary or profile and save the journal files that changed. It never touches
 /// library.json (no save, no library snapshot), and it doesn't check the library's lock: a damaged
-/// or newer library must not block the diary. Each journal file guards itself.
-#[cfg_attr(not(test), allow(dead_code))] // first caller: the diary commands in Phase 3
+/// or newer library must not block the diary. Each journal file guards itself. When `f` or the save
+/// fails, the unsaved change is dropped from memory too (and the pending undo goes back), so what the
+/// next read shows is what is on disk.
 pub(crate) fn mutate_journal<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>) -> Result<T, String> {
     let mut guard = state.lock().unwrap();
     let st = &mut *guard;
-    let out = f(st)?;
-    st.journal.save_dirty()?;
-    Ok(out)
+    let out = f(st).and_then(|v| st.journal.save_dirty().map(|_| v));
+    if out.is_err() {
+        st.journal.discard_unsaved();
+    }
+    out
 }
 
 /// What every recipe change ends with (the classic save_recipe_changes): a new modified time,
@@ -878,6 +888,35 @@ pub fn run() {
             foods::food_preview,
             foods::off_open,
             foods::online_food_draft,
+            diary::diary_day,
+            diary::log_food,
+            diary::quick_add,
+            diary::quick_add_check,
+            diary::diary_foods,
+            diary::edit_entry,
+            diary::copy_entries,
+            diary::set_day_complete,
+            diary::planned_meals,
+            diary::log_planned,
+            diary::delete_entry,
+            diary::undo_diary,
+            exercise::exercise_activities,
+            exercise::exercise_estimate,
+            exercise::log_exercise,
+            exercise::save_activity,
+            exercise::edit_exercise,
+            exercise::delete_exercise,
+            exercise::delete_activity,
+            goals::targets_view,
+            goals::targets_preview,
+            goals::save_targets,
+            goals::accept_target_update,
+            body::body_view,
+            body::log_measure,
+            body::undo_body,
+            body::edit_measurements,
+            body::save_measure,
+            body::archive_measure,
         ])
         .run(tauri::generate_context!())
         .expect("Tiffin couldn't start");

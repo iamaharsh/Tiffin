@@ -83,6 +83,8 @@ const FIRST_TOKEN: f32 = 0.4;
 const PRECISION: f32 = 1.0;
 const PROCESSED_PENALTY: f32 = 0.5;
 const MY_FOOD_BONUS: f32 = 0.05;
+/// A food the person logged before wins a tie against an equal-scoring row (D-05).
+const LOGGED_BONUS: f32 = 0.05;
 /// The food the recipe estimator picks for the query words (its hand-checked matches) is what people usually mean.
 const ESTIMATOR_PICK: f32 = 1.5;
 /// Words that mark a prepared or processed food; each one the query did not ask for costs `PROCESSED_PENALTY`.
@@ -169,13 +171,15 @@ enum Item {
     Db(usize),
     Mine(usize),
     Online(usize),
+    Recipe(usize),
 }
 
-fn mine_score(q: &[String], f: &MyFood, pick: bool) -> Option<f32> {
+/// Score of a name and its comma separated aliases, with the My Food bonus (My Foods and recipes both use it).
+fn mine_score(q: &[String], name: &str, aliases: &str, pick: bool) -> Option<f32> {
     let w = |i: usize, t: &str| weight(&q[i], i + 1 == q.len(), t);
-    let name = words(&f.name);
-    let head = words(f.name.split(',').next().unwrap_or(""));
-    let aliases = f.aliases.split(',').map(words).filter(|a| !a.is_empty());
+    let head = words(name.split(',').next().unwrap_or(""));
+    let name = words(name);
+    let aliases = aliases.split(',').map(words).filter(|a| !a.is_empty());
     let best = std::iter::once(score(q, &name, &head, &w)).chain(aliases.map(|a| score(q, &a, &a, &w))).flatten().max_by(f32::total_cmp);
     // the estimator tries My Foods before its own picks, so a My Food keeps its place above the pick
     best.map(|s| s + MY_FOOD_BONUS + if pick { ESTIMATOR_PICK } else { 0.0 })
@@ -189,9 +193,22 @@ fn online_score(q: &[String], f: &OnlineFood) -> Option<f32> {
     score(q, &toks, &head, &w)
 }
 
+/// A recipe in the search: its uid, name and what one serving holds (None when it has no estimate yet).
+#[derive(Clone, Debug)]
+pub struct RecipeFood {
+    pub uid: String,
+    pub name: String,
+    pub per_serving: Option<Nutrients>,
+}
+
 /// Find foods for `q` across the bundled foods, `mine` and the cached `online` products: one list, best first,
 /// at most [`MAX_RESULTS`] rows. A blank query lists the My Foods by name and nothing else.
 pub fn search(q: &str, mine: &[MyFood], online: &[OnlineFood]) -> Vec<FoodRow> {
+    search_with(q, mine, online, &[], &[])
+}
+
+/// [`search`] with the user's recipes in the list too, and the row keys already `logged` winning ties.
+pub fn search_with(q: &str, mine: &[MyFood], online: &[OnlineFood], recipes: &[RecipeFood], logged: &[String]) -> Vec<FoodRow> {
     let qt = words(q);
     if qt.is_empty() {
         let mut m: Vec<&MyFood> = mine.iter().collect();
@@ -215,11 +232,12 @@ pub fn search(q: &str, mine: &[MyFood], online: &[OnlineFood]) -> Vec<FoodRow> {
     let w = |i: usize, t: &str| maps[i].get(t).copied();
     let pick = nutrition::lookup(q);
     // (score, comma segments, source rank, position, item); sorted best first
+    let bonus = |key: String| if logged.contains(&key) { LOGGED_BONUS } else { 0.0 };
     let mut hits: Vec<(f32, usize, u8, usize, Item)> = vec![];
     for &i in &cands {
         let f = &foods[i as usize];
         if let Some(s) = score(&qt, &f.tokens, &f.head, &w) {
-            let s = if pick == Some(f.name) { s + ESTIMATOR_PICK } else { s };
+            let s = if pick == Some(f.name) { s + ESTIMATOR_PICK } else { s } + bonus(format!("db:{}", f.id));
             let rank = match f.source {
                 'F' => 1,
                 'S' => 2,
@@ -230,13 +248,18 @@ pub fn search(q: &str, mine: &[MyFood], online: &[OnlineFood]) -> Vec<FoodRow> {
         }
     }
     for (i, f) in mine.iter().enumerate() {
-        if let Some(s) = mine_score(&qt, f, pick.is_some()) {
-            hits.push((s, f.name.split(',').count(), 0, i, Item::Mine(i)));
+        if let Some(s) = mine_score(&qt, &f.name, &f.aliases, pick.is_some()) {
+            hits.push((s + bonus(format!("my:{}", f.id)), f.name.split(',').count(), 0, i, Item::Mine(i)));
+        }
+    }
+    for (i, r) in recipes.iter().enumerate() {
+        if let Some(s) = mine_score(&qt, &r.name, "", pick.is_some()) {
+            hits.push((s + bonus(format!("recipe:{}", r.uid)), r.name.split(',').count(), 0, i, Item::Recipe(i)));
         }
     }
     for (i, f) in online.iter().enumerate() {
         if let Some(s) = online_score(&qt, f) {
-            hits.push((s, f.name.split(',').count(), 5, i, Item::Online(i)));
+            hits.push((s + bonus(format!("off:{}", f.code)), f.name.split(',').count(), 5, i, Item::Online(i)));
         }
     }
     hits.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
@@ -246,6 +269,7 @@ pub fn search(q: &str, mine: &[MyFood], online: &[OnlineFood]) -> Vec<FoodRow> {
             Item::Db(i) => db_row(&foods[i]),
             Item::Mine(i) => my_row(&mine[i]),
             Item::Online(i) => online_row(&online[i]),
+            Item::Recipe(i) => recipe_row(&recipes[i]),
         })
         .collect()
 }
@@ -255,25 +279,29 @@ fn row(key: String, name: &str, brand: &str, tag: &'static str, n: &Nutrients, b
     FoodRow { key, name: name.to_string(), brand: brand.to_string(), tag, kcal: n.calories, protein: n.protein_g, carbs: n.carbs_g, fat: n.fat_g, basis }
 }
 
-fn db_row(f: &DbFood) -> FoodRow {
+pub(crate) fn db_row(f: &DbFood) -> FoodRow {
     let tag = if f.source == 'C' { "Canada" } else { "USDA" };
     row(format!("db:{}", f.id), f.name, "", tag, &f.nutrients(), "per 100 g".into())
 }
 
-fn my_row(f: &MyFood) -> FoodRow {
+pub(crate) fn my_row(f: &MyFood) -> FoodRow {
     let serving = if f.serving.trim().is_empty() { "serving" } else { f.serving.trim() };
     let basis = if f.serving_g > 0.0 { format!("per {} ({} g)", serving, num1(f.serving_g)) } else { format!("per {}", serving) };
     row(format!("my:{}", f.id), &f.name, "", "My Food", &f.per_serving, basis)
 }
 
-fn online_row(f: &OnlineFood) -> FoodRow {
+pub(crate) fn online_row(f: &OnlineFood) -> FoodRow {
     row(format!("off:{}", f.code), &f.name, &f.brands, "Open Food Facts", &f.per100, "per 100 g".into())
+}
+
+pub(crate) fn recipe_row(r: &RecipeFood) -> FoodRow {
+    row(format!("recipe:{}", r.uid), &r.name, "", "Recipe", &r.per_serving.unwrap_or_default(), "per serving".into())
 }
 
 // ---------------------------------------------------------------------------------------------
 // One food: units, amount, nutrients
 
-const GONE: &str = "That food isn't in the list any more.";
+pub const GONE: &str = "That food isn't in the list any more.";
 const BAD_UNIT: &str = "That unit doesn't work for this food.";
 const BAD_AMOUNT: &str = "Enter an amount of 0 or more.";
 
@@ -293,7 +321,18 @@ pub struct FoodDetail {
     pub amount: f32,
     #[serde(skip)]
     pub per100: Nutrients,
+    /// What one serving holds, for a recipe whose weight is not known (its entries are counted in servings, not grams).
+    #[serde(skip)]
+    pub per_serving: Option<Nutrients>,
+    /// Shown above the amount: what logging this food will do to the day's totals.
+    pub warning: Option<&'static str>,
+    /// A softer line: the food is fine to log, some figures just are not known.
+    pub note: Option<&'static str>,
 }
+
+const NO_CALORIES: &str = "No calories on record for this food. Your day's calorie total will show – while it is logged.";
+const NO_ESTIMATE: &str = "No nutrition estimate for this recipe yet. You can still log it; every value will show –. Calculate its nutrition on the recipe page to fill it in.";
+const SOME_UNKNOWN: &str = "Some values aren't known for this recipe, so some totals will show –.";
 
 /// What an amount of a food weighs and holds. `None` is "not reported" (shown as "–"), never 0.
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -357,10 +396,11 @@ fn db_pieces(f: &DbFood) -> Vec<(String, f32)> {
 
 /// Open the food `key` (a row's key): its units in the Metric or US order, and where it starts (D-13).
 pub fn detail(key: &str, mine: &[MyFood], online: &[OnlineFood], us: bool) -> Result<FoodDetail, String> {
-    let make = |key: &str, name: &str, brand: &str, tag, online, suspect, per100, serving: Option<(&str, f32)>, density, pieces: &[(String, f32)]| {
+    let make = |key: &str, name: &str, brand: &str, tag, online, suspect, per100: Nutrients, serving: Option<(&str, f32)>, density, pieces: &[(String, f32)]| {
         let units = portions::units(serving, density, pieces, us);
         let (unit, amount) = if units.iter().any(|u| u.id == "serving") { ("serving", 1.0) } else { ("g", 100.0) };
-        FoodDetail { key: key.into(), name: name.into(), brand: brand.into(), tag, online, suspect, units, unit: unit.into(), amount, per100 }
+        let warning = per100.calories.is_none().then_some(NO_CALORIES);
+        FoodDetail { key: key.into(), name: name.into(), brand: brand.into(), tag, online, suspect, units, unit: unit.into(), amount, per100, per_serving: None, warning, note: None }
     };
     let (kind, id) = key.split_once(':').ok_or(GONE)?;
     match kind {
@@ -385,6 +425,33 @@ pub fn detail(key: &str, mine: &[MyFood], online: &[OnlineFood], us: bool) -> Re
     }
 }
 
+/// A recipe opened as a food, logged by the serving. With its serving weight (`serving_g`, known only when every ingredient weighs)
+/// it also offers grams; without one the only unit is the serving and the figures are per serving (D-08, D-09).
+pub fn recipe_detail(r: &RecipeFood, serving_g: Option<f32>, us: bool) -> FoodDetail {
+    let known = r.per_serving.unwrap_or_default();
+    let weight = serving_g.filter(|g| valid_g(*g));
+    let (units, per100, per_serving) = match weight {
+        Some(g) => (portions::units(Some(("serving", g)), None, &[], us), known.scaled(100.0 / g), None),
+        None => (vec![Unit { id: "serving".into(), label: "serving".into(), grams: 0.0 }], Nutrients::default(), Some(known)),
+    };
+    let some_unknown = r.per_serving.is_some_and(|n| [n.calories, n.protein_g, n.carbs_g, n.fat_g, n.fiber_g, n.sugar_g, n.sodium_mg].contains(&None));
+    FoodDetail {
+        key: format!("recipe:{}", r.uid),
+        name: r.name.clone(),
+        brand: String::new(),
+        tag: "Recipe",
+        online: false,
+        suspect: false,
+        units,
+        unit: "serving".into(),
+        amount: 1.0,
+        per100,
+        per_serving,
+        warning: r.per_serving.is_none().then_some(NO_ESTIMATE),
+        note: some_unknown.then_some(SOME_UNKNOWN),
+    }
+}
+
 /// `amount` of `unit`, or, when `from` names another unit, the amount typed in `from` converted to `unit` keeping the weight.
 /// What was typed is used as typed (0.25 cup is 0.25 cup); only an amount converted from another unit is rounded to 1 decimal,
 /// and that rounded amount is what goes back in the box, so the box, the weight line and the figures agree. An empty or 0 amount gives no weight and every nutrient unknown (D-15).
@@ -399,6 +466,14 @@ pub fn amount(d: &FoodDetail, amount: Option<f32>, unit: &str, from: Option<&str
     let Some(a) = amount else { return none(None) };
     if !a.is_finite() || a < 0.0 {
         return Err(BAD_AMOUNT.into());
+    }
+    // a unit with no weight (a recipe serving of unknown size) can't be converted, and measures no grams
+    if src.is_some_and(|s| s.grams <= 0.0) || to.grams <= 0.0 && src.is_some() {
+        return Err(BAD_UNIT.into());
+    }
+    if to.grams <= 0.0 {
+        let per = d.per_serving.unwrap_or_default();
+        return Ok(Amount { amount: Some(a), grams: None, nutrients: display(&per.scaled(a)) });
     }
     let a = src.map_or(a, |s| round1(a * s.grams / to.grams));
     if a == 0.0 {
@@ -744,5 +819,65 @@ mod tests {
         println!("median {median_ms:.2} ms");
         let limit = if cfg!(debug_assertions) { 150.0 } else { 50.0 };
         assert!(median_ms < limit, "median {median_ms} ms is over {limit} ms");
+    }
+
+    fn tomato_soup(per_serving: Option<Nutrients>) -> RecipeFood {
+        RecipeFood { uid: "u1".into(), name: "Tomato soup".into(), per_serving }
+    }
+
+    fn soup_nutrients() -> Nutrients {
+        Nutrients { calories: Some(400.0), protein_g: Some(20.0), fat_g: Some(10.0), carbs_g: Some(50.0), fiber_g: None, sugar_g: Some(5.0), sodium_mg: Some(300.0) }
+    }
+
+    #[test]
+    fn recipe_detail_offers_grams_only_with_a_weight() {
+        let weighed = recipe_detail(&tomato_soup(Some(soup_nutrients())), Some(250.0), false);
+        assert_eq!((weighed.key.as_str(), weighed.tag, weighed.unit.as_str(), weighed.amount), ("recipe:u1", "Recipe", "serving", 1.0));
+        assert_eq!(ids(&weighed), ["g", "serving", "oz"]);
+        assert_eq!(weighed.units[1].label, "serving (250 g)");
+        let a = amount(&weighed, Some(1.5), "serving", None).unwrap();
+        assert_eq!((a.grams, a.nutrients.calories, a.nutrients.fiber_g), (Some(375.0), Some(600.0), None));
+        assert_eq!(weighed.note, Some("Some values aren't known for this recipe, so some totals will show –."));
+        assert_eq!(weighed.warning, None);
+
+        let light = recipe_detail(&tomato_soup(Some(soup_nutrients())), None, false);
+        assert_eq!(ids(&light), ["serving"]);
+        let a = amount(&light, Some(2.0), "serving", None).unwrap();
+        assert_eq!((a.grams, a.nutrients.calories), (None, Some(800.0)));
+        assert_eq!(amount(&light, Some(100.0), "g", None).unwrap_err(), "That unit doesn't work for this food.");
+        assert_eq!(amount(&light, Some(1.0), "serving", Some("g")).unwrap_err(), "That unit doesn't work for this food.");
+        assert_eq!(amount(&light, None, "serving", None).unwrap().amount, None);
+
+        let none = recipe_detail(&tomato_soup(None), None, false);
+        assert_eq!(none.warning, Some("No nutrition estimate for this recipe yet. You can still log it; every value will show –. Calculate its nutrition on the recipe page to fill it in."));
+        assert_eq!(amount(&none, Some(1.0), "serving", None).unwrap().nutrients, Nutrients::default());
+    }
+
+    #[test]
+    fn recipes_join_the_search() {
+        let soup = tomato_soup(Some(soup_nutrients()));
+        let rows = search_with("tomato soup", &[], &[], std::slice::from_ref(&soup), &[]);
+        let r = rows.iter().find(|r| r.key == "recipe:u1").expect("the recipe is listed");
+        assert_eq!((r.tag, r.basis.as_str(), r.kcal, r.name.as_str()), ("Recipe", "per serving", Some(400.0), "Tomato soup"));
+        let blank = search_with("", &[my(1, "Whey")], &[], std::slice::from_ref(&soup), &[]);
+        assert_eq!(blank.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["my:1"]);
+        assert!(!search("tomato soup", &[], &[]).iter().any(|r| r.tag == "Recipe"), "plain search never lists recipes");
+        // foods logged before win a tie against an equal-scoring row
+        let twins = [my(1, "Bowl"), my(2, "Bowl")];
+        assert_eq!(search_with("bowl", &twins, &[], &[], &[])[0].key, "my:1");
+        assert_eq!(search_with("bowl", &twins, &[], &[], &["my:2".to_string()])[0].key, "my:2");
+        // a recipe row with no estimate shows unknowns
+        let bare = search_with("tomato soup", &[], &[], &[tomato_soup(None)], &[]);
+        assert_eq!(bare.iter().find(|r| r.key == "recipe:u1").unwrap().kcal, None);
+    }
+
+    #[test]
+    fn unknown_calories_warn() {
+        let o = OnlineFood { code: "1".into(), name: "Mystery bar".into(), ..Default::default() };
+        let d = detail("off:1", &[], &[o.clone()], false).unwrap();
+        assert_eq!(d.warning, Some("No calories on record for this food. Your day's calorie total will show – while it is logged."));
+        let known = OnlineFood { per100: Nutrients { calories: Some(59.0), ..Default::default() }, ..o };
+        assert_eq!(detail("off:1", &[], &[known], false).unwrap().warning, None);
+        assert_eq!(my_detail(&whey()).warning, None);
     }
 }

@@ -6,6 +6,7 @@
   import Segmented from './Segmented.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
   import ApplyMenuDialog from './ApplyMenuDialog.svelte';
+  import PlanRecipeDialog from './PlanRecipeDialog.svelte';
   import * as api from './api';
   import type { Card, Category, Meal, MealType, MenuOut } from './api';
 
@@ -30,6 +31,8 @@
   let menu: { x: number; y: number; items: MenuItem[] } | null = $state(null);
   // "Add a Menu…": the saved menus, and the first day suggested for Day 1
   let applying: { menus: MenuOut[]; start: number } | null = $state(null);
+  // the recipe picker sheet, opened from an empty slot or a day's "+"
+  let choosing: { day: number; kind: MealType | null } | null = $state(null);
 
   // the recipe picker on the right
   let shelf = $state('all');
@@ -139,6 +142,11 @@
     if (pick) add(pick, day, kind);
     else if (view !== 'day') { anchor = day; view = 'day'; }
   }
+  /** An empty slot or a day's "+": adds the recipe picked on the right, or opens the picker sheet. */
+  function addTo(day: number, kind: MealType | null = null) {
+    if (pick) add(pick, day, kind);
+    else choosing = { day, kind };
+  }
 
   function mealMenu(e: MouseEvent, m: Meal) {
     e.preventDefault();
@@ -192,7 +200,7 @@
   }
 
   function keys(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || menu) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || menu || choosing) return;
     if (e.key === 'Escape' && pick) pick = null;
     else if (e.key === 'ArrowLeft') step(-1);
     else if (e.key === 'ArrowRight') step(1);
@@ -217,10 +225,11 @@
     onkeydown={(e) => mealKeys(e, m)}
     data-meal={m.id}
     aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown"
-    title="{m.kind}: {m.name} (Alt+arrow keys move it)"
+    title="{m.kind}: {m.name}{m.eaten ? ' · eaten (in the diary)' : ''} (Alt+arrow keys move it)"
   >
     {#if big}<span class="thumb"><Photo photo={m.photo} seed={m.seed} /></span>{:else}<span class="bar"></span>{/if}
     <span class="mname">{m.name}</span>
+    {#if m.eaten}<span class="eaten"><Icon name="check" size={13} /><span class="sr">Eaten, logged in the diary</span></span>{/if}
     {#if !big}<span class="kind" aria-label={m.kind}>{kindShort[m.kind]}</span>{/if}
   </button>
 {/snippet}
@@ -296,7 +305,7 @@
               {#each on(d) as m (m.id)}
                 <div class="slot"><span class="k caps">{m.kind}</span>{@render chip(m, true)}</div>
               {/each}
-              <button class="addzone" onclick={() => clickDay(d)} aria-label="Add to {api.dayLabel(d, { weekday: 'long' })}">
+              <button class="addzone" onclick={() => addTo(d)} aria-label="Add to {api.dayLabel(d, { weekday: 'long' })}">
                 <Icon name="plus" size={15} />
               </button>
             </div>
@@ -318,9 +327,9 @@
             <h2 class="caps">{k}</h2>
             <div class="cards">
               {#each list as m (m.id)}{@render chip(m, true)}{/each}
-              <button class="dropzone" onclick={() => clickDay(anchor, k)}>
+              <button class="dropzone" onclick={() => addTo(anchor, k)}>
                 <Icon name="plus" size={16} />
-                {pick ? `Add ${pick.name}` : 'Drag a recipe here, or pick one on the right'}
+                {pick ? `Add ${pick.name}` : 'Choose a recipe, or drag one here'}
               </button>
             </div>
           </section>
@@ -368,8 +377,10 @@
 {#if applying}
   <ApplyMenuDialog menus={applying.menus} start={applying.start} {today} onclose={() => (applying = null)} ondone={(msg) => { applying = null; onnote(msg); load(); }} {onerror} />
 {/if}
+{#if choosing}<PlanRecipeDialog day={choosing.day} kind={choosing.kind} onclose={() => (choosing = null)} onadded={load} />{/if}
 
 <style>
+  .eaten { display: inline-flex; flex: none; color: var(--ok); }
   /* purple text dark enough to read on both themes; a deeper purple behind white text */
   .meals {
     --meals-ink: color-mix(in srgb, var(--tile-meals), var(--ink) 30%);

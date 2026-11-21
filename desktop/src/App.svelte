@@ -19,6 +19,10 @@
   import GroceriesPage from './lib/GroceriesPage.svelte';
   import PantryPage from './lib/PantryPage.svelte';
   import FoodsPage from './lib/FoodsPage.svelte';
+  import DiaryPage from './lib/DiaryPage.svelte';
+  import TargetsPage from './lib/TargetsPage.svelte';
+  import BodyPage from './lib/BodyPage.svelte';
+  import { targetsDirty } from './lib/targets.svelte';
   import MealsPage from './lib/MealsPage.svelte';
   import MenusPage from './lib/MenusPage.svelte';
   import SettingsPage from './lib/SettingsPage.svelte';
@@ -304,6 +308,8 @@
   });
   // An open editor, a recipe under review or imported recipes waiting hold an update install back.
   holdsUnsaved(() => editing !== null || review !== null || queue.length > 0);
+  // The Targets draft outlives its page, so an install waits for it even while the page is closed.
+  holdsUnsaved(targetsDirty);
   // Rust enforces it where the install runs; this also runs on mount, so a reload clears a stale value.
   $effect(() => {
     api.setUnsaved(update.unsaved).catch((e) => fail(String(e)));
@@ -477,6 +483,12 @@
       <PantryPage onerror={fail} onnote={note} />
     {:else if section === 'foods'}
       <FoodsPage bind:units={foodUnits} onchanged={refresh} onerror={fail} onnote={note} />
+    {:else if section === 'diary'}
+      <DiaryPage units={foodUnits} onerror={fail} onnote={note} ongoto={(s) => { if (!busyEditing()) { parkReview(); planFor = null; section = s; scroller.scrollTop = 0; } }} />
+    {:else if section === 'targets'}
+      <TargetsPage onerror={fail} onnote={note} />
+    {:else if section === 'body'}
+      <BodyPage onerror={fail} onnote={note} />
     {:else if section !== 'recipes'}
       <!-- a page whose data hasn't loaded yet shows nothing, rather than falling through to the recipe list -->
     {:else}

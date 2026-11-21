@@ -6,11 +6,27 @@
   import OffEmailDialog from './OffEmailDialog.svelte';
   import SourceTag from './SourceTag.svelte';
   import * as api from './api';
-  import type { FoodDetail as Info, FoodRow, OnlineResult } from './api';
+  import type { FoodDetail as Info, FoodRow, MealType, OnlineResult } from './api';
 
   // The one food search: local results on every keystroke, Open Food Facts only when asked.
-  // A standalone page now; Phase 3 reuses it inside the diary's add-food dialog.
-  let { us, onerror, onadd, actions: extra }: { us: boolean; onerror: (m: string) => void; onadd?: (name?: string) => void; actions?: Snippet<[Info]> } = $props();
+  // `layout="page"` is the Foods page; `layout="dialog"` is the diary's Add Food dialog: planned, recent and
+  // frequent foods before typing, and two panes or a stacked list by its own width (never a nested sheet).
+  let { us, onerror, onadd, actions: extra, onenter, layout = 'page', today = '', day = '', mealSlot = 'Breakfast' }: {
+    us: boolean;
+    onerror: (m: string) => void;
+    onadd?: (name?: string) => void;
+    actions?: Snippet<[Info]>;
+    /** Enter in the Amount box: the host does what its primary button does */
+    onenter?: (d: Info) => void;
+    layout?: 'page' | 'dialog';
+    /** the local day, for ranking recent and frequent foods (dialog layout) */
+    today?: string;
+    /** the diary day being added to, for the planned recipes listed first (dialog layout) */
+    day?: string;
+    /** the meal being added to: its planned recipes come first (dialog layout). Not `slot`: Svelte reserves that attribute on components. */
+    mealSlot?: MealType;
+  } = $props();
+  const dialog = $derived(layout === 'dialog');
 
   let q = $state('');
   let rows: FoodRow[] = $state([]);
@@ -22,16 +38,23 @@
   let cooldown = $state(0);
   /** no contact email is saved: ask for one before anything goes online */
   let askEmail = $state(false);
-  let status: { text: string; warn: boolean } | null = $state(null);
+  let status: { text: string; warn: boolean; ok?: boolean } | null = $state(null);
+  /** dialog layout: foods logged before, taken once when the dialog opens and not reordered while it stays open */
+  let planned: FoodRow[] = $state([]);
+  let recent: FoodRow[] = $state([]);
+  let frequent: FoodRow[] = $state([]);
+  let history = false;
   let open: { key: string; name: string } | null = $state(null);
   let box: HTMLInputElement | undefined = $state();
-  let list: HTMLUListElement | undefined = $state();
+  let list: HTMLElement | undefined = $state();
+  let bodyEl: HTMLElement | undefined = $state();
+  let bodyW = $state(0);
   let panel: HTMLElement | undefined = $state();
-  let detail: { focusAmount: () => void } | undefined = $state();
+  let detail: { focusAmount: () => void; food: () => Info | null } | undefined = $state();
   let seq = 0;
   let gen = $state(0);
 
-  // two columns from 1100 px wide; below that the detail opens as a sheet
+  // page layout: two columns from 1100 px wide; below that the detail opens as a sheet
   const wideQuery = window.matchMedia('(min-width: 1100px)');
   let wide = $state(wideQuery.matches);
   $effect(() => {
@@ -40,11 +63,28 @@
     return () => wideQuery.removeEventListener('change', f);
   });
 
+  // dialog layout: measure the body itself, never the window (the sidebar and the dialog's own width move it)
+  const split = $derived(dialog ? bodyW >= 680 : wide);
+  $effect(() => {
+    if (!bodyEl) return;
+    bodyW = bodyEl.clientWidth;
+    const ro = new ResizeObserver(([e]) => (bodyW = e.contentRect.width));
+    ro.observe(bodyEl);
+    return () => ro.disconnect();
+  });
+
   async function search(text: string) {
     const mine = ++seq; // a slower older answer never replaces a newer one
     const timer = setTimeout(() => { if (mine === seq) preparing = true; }, 300);
     try {
-      const got = await api.searchFoods(text);
+      let got: { rows: FoodRow[]; online_ready: boolean };
+      if (dialog) {
+        const d = await api.diaryFoods(text, today, day, mealSlot);
+        if (mine === seq && !history && !text.trim()) { planned = d.planned; recent = d.recent; frequent = d.frequent; history = true; }
+        got = d;
+      } else {
+        got = await api.searchFoods(text);
+      }
       if (mine === seq) { rows = got.rows; onlineReady = got.online_ready; failure = ''; loaded = true; }
     } catch (e) {
       if (mine === seq) failure = String(e);
@@ -121,6 +161,29 @@
       detail?.focusAmount();
     }
   }
+  /** Empty the search, release the open food and put the cursor back in the box (after an add). */
+  export async function clear() {
+    q = '';
+    status = null;
+    open = null;
+    search('');
+    await tick();
+    box?.focus();
+  }
+  /** Say something in the status line, with a check, until the next keystroke. */
+  export function confirm(text: string) {
+    status = { text, warn: false, ok: true };
+  }
+  /** Esc: clear the typed text, or go back to the results when stacked. False when there is nothing left to undo, so the host closes. */
+  export function escape(): boolean {
+    if (q) { clear(); return true; }
+    if (dialog && !split && open) { closeDetail(); return true; }
+    return false;
+  }
+  /** The open food with the amount and unit chosen, or null when none is open or it is still loading (for the host's Add button). */
+  export function chosen(): Info | null {
+    return open ? (detail?.food() ?? null) : null;
+  }
   async function closeDetail() {
     const k = open?.key;
     open = null;
@@ -136,7 +199,7 @@
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       list?.querySelector<HTMLElement>('button.row')?.focus();
-    } else if (e.key === 'Escape' && q) {
+    } else if (e.key === 'Escape' && q && !dialog) { // in the dialog, Esc goes through the host's escape()
       e.preventDefault();
       q = '';
       status = null;
@@ -154,7 +217,7 @@
   }
   // Escape inside the side panel hands focus back to the open row
   function windowKeys(e: KeyboardEvent) {
-    if (e.key === 'Escape' && wide && open && panel?.contains(document.activeElement)) {
+    if (e.key === 'Escape' && !dialog && wide && open && panel?.contains(document.activeElement)) {
       e.preventDefault();
       list?.querySelector<HTMLElement>('[aria-current="true"]')?.focus();
     }
@@ -171,16 +234,98 @@
 
 {#snippet val(x: number | null)}{#if x == null}<span aria-hidden="true">–</span><span class="sr">not reported</span>{:else}{x}{/if}{/snippet}
 
-<div class="search">
+{#snippet rowItem(r: FoodRow)}
+  <li>
+    <button
+      type="button"
+      class="row"
+      data-key={r.key}
+      aria-current={open?.key === r.key ? 'true' : undefined}
+      onclick={() => openRow(r)}
+      onkeydown={rowKeys}
+    >
+      <span class="l1">
+        <span class="title" title={r.brand ? `${r.name} · ${r.brand}` : r.name}>{r.name}{#if r.brand}<span class="brand"> · {r.brand}</span>{/if}</span>
+        <SourceTag tag={r.tag} />
+      </span>
+      <span class="l2 fine">
+        <span><span class="num">{@render val(r.kcal)}</span> kcal</span>
+        <span class="m"><i class="dot p" aria-hidden="true"></i><span class="caps">P</span> <span class="num">{@render val(r.protein)}</span></span>
+        <span class="m"><i class="dot c" aria-hidden="true"></i><span class="caps">C</span> <span class="num">{@render val(r.carbs)}</span></span>
+        <span class="m"><i class="dot f" aria-hidden="true"></i><span class="caps">F</span> <span class="num">{@render val(r.fat)}</span></span>
+        <span>{r.basis}</span>
+      </span>
+    </button>
+  </li>
+{/snippet}
+
+{#snippet results()}
+  {#if failure}
+    <div class="notice">
+      <p>Couldn't search the food list: {failure}. Press Retry Search, or restart Tiffin if it keeps happening.</p>
+      <button type="button" class="online retry" onclick={() => search(q)}>Retry Search</button>
+    </div>
+  {:else if dialog && !trimmed}
+    {#if loaded}
+      {#if planned.length}
+        <h2 class="caps mine">Planned <span class="num">{planned.length}</span></h2>
+        <ul class="rows">{#each planned as r (r.key)}{@render rowItem(r)}{/each}</ul>
+      {/if}
+      {#if recent.length}
+        <h2 class="caps mine">Recent <span class="num">{recent.length}</span></h2>
+        <ul class="rows">{#each recent as r (r.key)}{@render rowItem(r)}{/each}</ul>
+      {/if}
+      {#if frequent.length}
+        <h2 class="caps mine">Frequent <span class="num">{frequent.length}</span></h2>
+        <ul class="rows">{#each frequent as r (r.key)}{@render rowItem(r)}{/each}</ul>
+      {/if}
+      {#if !planned.length && !recent.length && !frequent.length}
+        <p class="fine first">Foods you log show up here, so the next one is a click away.</p>
+        {#if rows.length}
+          <h2 class="caps mine">My Foods <span class="num">{rows.length}</span></h2>
+          <ul class="rows">{#each rows as r (r.key)}{@render rowItem(r)}{/each}</ul>
+        {/if}
+      {/if}
+    {/if}
+  {:else}
+    {#if loaded && !rows.length}
+      {#if trimmed}
+        <div class="empty">
+          <h2>No foods match “{trimmed}”</h2>
+          <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. You can also add it yourself.</p>
+          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(trimmed)}>Add “{trimmed}” as a Food</button>{/if}
+        </div>
+      {:else}
+        <div class="empty">
+          <h2>Look up any food</h2>
+          <p>Search about 18,000 foods stored on this PC, or add one from its label. Nothing is sent anywhere until you press Search Online.</p>
+          {#if onadd}<button type="button" class="add primary" onclick={() => onadd()}>Add a Food</button>{/if}
+        </div>
+      {/if}
+    {/if}
+
+    {#if rows.length && !trimmed}
+      <div class="minehead">
+        <h2 class="caps mine">My Foods <span class="num">{rows.length}</span></h2>
+        {#if onadd}<button type="button" class="add primary" onclick={() => onadd()}>Add a Food</button>{/if}
+      </div>
+    {/if}
+    <ul class="rows">{#each rows as r (r.key)}{@render rowItem(r)}{/each}</ul>
+    {#if rows.length >= 50 && trimmed}<p class="fine more">Showing the best 50. Type more to narrow it down.</p>{/if}
+  {/if}
+{/snippet}
+
+<div class="search" class:dlg={dialog}>
   <div class="bar">
     <Icon name="search" size={18} />
     <input
       bind:this={box}
+      class="q"
       value={q}
       oninput={typed}
       onkeydown={fieldKeys}
-      placeholder="Search foods"
-      aria-label="Search foods"
+      placeholder={dialog ? 'Search foods and recipes' : 'Search foods'}
+      aria-label={dialog ? 'Search foods and recipes' : 'Search foods'}
       autocomplete="off"
       spellcheck="false"
     />
@@ -201,95 +346,65 @@
     {#if preparing}
       Getting the food list ready…
     {:else if status}
-      {#if status.warn}<Icon name="warn" size={14} />{/if}{status.text}
+      {#if status.warn}<Icon name="warn" size={14} />{/if}{#if status.ok}<Icon name="check" size={16} />{/if}{status.text}
     {:else if trimmed}
       Search Online sends only the words you typed, and your contact email, to Open Food Facts.
     {/if}
   </p>
 
-  <div class="body" class:wide>
-    <div class="results">
-      {#if failure}
-        <div class="notice">
-          <p>Couldn't search the food list: {failure}. Press Retry Search, or restart Tiffin if it keeps happening.</p>
-          <button type="button" class="online retry" onclick={() => search(q)}>Retry Search</button>
-        </div>
-      {:else if loaded && !rows.length}
-        {#if trimmed}
-          <div class="empty">
-            <h2>No foods match “{trimmed}”</h2>
-            <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. You can also add it yourself.</p>
-            {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(trimmed)}>Add “{trimmed}” as a Food</button>{/if}
-          </div>
-        {:else}
-          <div class="empty">
-            <h2>Look up any food</h2>
-            <p>Search about 18,000 foods stored on this PC, or add one from its label. Nothing is sent anywhere until you press Search Online.</p>
-            {#if onadd}<button type="button" class="add primary" onclick={() => onadd()}>Add a Food</button>{/if}
-          </div>
-        {/if}
+  {#if dialog}
+    <div bind:this={bodyEl} class="dbody" class:split>
+      {#if split || !open}
+        <div bind:this={list} class="results pane">{@render results()}</div>
       {/if}
-
-      {#if rows.length && !trimmed}
-        <div class="minehead">
-          <h2 class="caps mine">My Foods <span class="num">{rows.length}</span></h2>
-          {#if onadd}<button type="button" class="add primary" onclick={() => onadd()}>Add a Food</button>{/if}
-        </div>
+      {#if split || open}
+        <aside bind:this={panel} class="dpanel pane" class:idle={!open} aria-label="Food amounts">
+          {#if !split}
+            <button type="button" class="btn ghost back" onclick={closeDetail}><Icon name="back" size={16} />Back to Results</button>
+          {/if}
+          {#if open}
+            {#key `${open.key}/${gen}`}
+              <FoodDetail bind:this={detail} key={open.key} name={open.name} {us} {onerror} actions={extra} {onenter} />
+            {/key}
+          {:else}
+            <p class="fine">Pick a food to see its amounts.</p>
+          {/if}
+        </aside>
       {/if}
-      <ul bind:this={list} class="rows">
-        {#each rows as r (r.key)}
-          <li>
-            <button
-              type="button"
-              class="row"
-              data-key={r.key}
-              aria-current={open?.key === r.key ? 'true' : undefined}
-              onclick={() => openRow(r)}
-              onkeydown={rowKeys}
-            >
-              <span class="l1">
-                <span class="title" title={r.brand ? `${r.name} · ${r.brand}` : r.name}>{r.name}{#if r.brand}<span class="brand"> · {r.brand}</span>{/if}</span>
-                <SourceTag tag={r.tag} />
-              </span>
-              <span class="l2 fine">
-                <span><span class="num">{@render val(r.kcal)}</span> kcal</span>
-                <span class="m"><i class="dot p" aria-hidden="true"></i><span class="caps">P</span> <span class="num">{@render val(r.protein)}</span></span>
-                <span class="m"><i class="dot c" aria-hidden="true"></i><span class="caps">C</span> <span class="num">{@render val(r.carbs)}</span></span>
-                <span class="m"><i class="dot f" aria-hidden="true"></i><span class="caps">F</span> <span class="num">{@render val(r.fat)}</span></span>
-                <span>{r.basis}</span>
-              </span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-      {#if rows.length >= 50}<p class="fine more">Showing the best 50. Type more to narrow it down.</p>{/if}
     </div>
+  {:else}
+    <div class="body" class:wide>
+      <div bind:this={list} class="results">{@render results()}</div>
 
-    {#if wide}
-      <aside bind:this={panel} class="panel" class:idle={!open} aria-label="Food amounts">
-        {#if open}
+      {#if wide}
+        <aside bind:this={panel} class="panel" class:idle={!open} aria-label="Food amounts">
+          {#if open}
+            {#key `${open.key}/${gen}`}
+              <FoodDetail bind:this={detail} key={open.key} name={open.name} {us} {onerror} actions={extra} {onenter} />
+            {/key}
+          {:else}
+            <p class="fine">Pick a food to see its amounts.</p>
+          {/if}
+        </aside>
+      {:else if open}
+        <Dialog wide title={open.name} onclose={closeDetail}>
           {#key `${open.key}/${gen}`}
-            <FoodDetail bind:this={detail} key={open.key} {us} {onerror} actions={extra} />
+            <FoodDetail bind:this={detail} key={open.key} name={open.name} {us} {onerror} named={false} actions={extra} {onenter} />
           {/key}
-        {:else}
-          <p class="fine">Pick a food to see its amounts.</p>
-        {/if}
-      </aside>
-    {:else if open}
-      <Dialog wide title={open.name} onclose={closeDetail}>
-        {#key `${open.key}/${gen}`}
-          <FoodDetail bind:this={detail} key={open.key} {us} {onerror} named={false} actions={extra} />
-        {/key}
-        {#snippet actions()}
-          <button type="button" class="btn" onclick={closeDetail}>Close</button>
-        {/snippet}
-      </Dialog>
-    {/if}
-  </div>
+          {#snippet actions()}
+            <button type="button" class="btn" onclick={closeDetail}>Close</button>
+          {/snippet}
+        </Dialog>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
-  .search { font-size: 14.5px; line-height: 1.45; }
+  .search { font-size: 14.5px; line-height: 1.45; color: var(--ink); }
+  /* a steady height, so the dialog does not jump while typing; the two panes scroll on their own */
+  .search.dlg { display: flex; flex-direction: column; flex: 1 1 480px; min-height: 480px; }
+  .dlg .status { margin: 8px 0; }
   .fine { font-size: 13px; line-height: 1.4; color: var(--ink-2); }
 
   .bar {
@@ -305,8 +420,9 @@
     box-shadow: var(--shadow-card), inset 0 0 0 1px var(--rule);
   }
   .bar:focus-within { box-shadow: 0 0 0 3px var(--focus), inset 0 0 0 1px var(--accent); }
-  .bar input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--ink); font: inherit; font-size: 15px; -webkit-user-select: text; user-select: text; }
-  .bar input::placeholder { color: var(--ink-3); }
+  /* input.q out-ranks the dialog's own field styles when this search sits inside a sheet */
+  .bar input.q { flex: 1; width: auto; height: 100%; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; background: none; box-shadow: none; color: var(--ink); font: inherit; font-size: 15px; -webkit-user-select: text; user-select: text; }
+  .bar input.q::placeholder { color: var(--ink-3); }
 
   /* secondary button: the label changes, the width does not, so the bar never shifts */
   .online {
@@ -337,6 +453,17 @@
 
   .body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }
   .body.wide { grid-template-columns: minmax(0, 1fr) 360px; }
+
+  .dbody { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 24px; }
+  .dbody.split { grid-template-columns: minmax(0, 1fr) 320px; }
+  .pane { min-height: 0; overflow-y: auto; }
+  .dpanel { padding: 16px; border-radius: 14px; background: var(--card); box-shadow: inset 0 0 0 1px var(--rule); }
+  .dpanel.idle { background: var(--well); box-shadow: none; text-align: center; }
+  .dpanel.idle p { margin: 0; }
+  .back { margin: 0 0 8px -8px; }
+  .first { margin: 8px 16px; }
+  .results > .mine { margin: 16px 0 8px; padding: 0 16px; }
+  .results > .mine:first-child { margin-top: 0; }
 
   .rows { list-style: none; margin: 0; padding: 0; }
   .row {

@@ -1,8 +1,9 @@
 //! The Foods page commands: local search on every keystroke, and Open Food Facts only on demand.
 //! Network work never runs under a lock; the rules live in `recipe_box::foods`.
 
-use recipe_box::foods::{self, off, Amount, FoodDetail, FoodRow, OnlineFood};
-use recipe_box::model::{self, MyFood};
+use recipe_box::foods::{self, off, Amount, FoodDetail, FoodRow, OnlineFood, RecipeFood};
+use recipe_box::model::{self, Library, MyFood, Recipe};
+use recipe_box::{health, nutrition};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
@@ -25,7 +26,7 @@ impl OffState {
 }
 
 /// The cached products, plus the hits of the last online search when asked (a hit replaces its cached copy).
-fn online_foods(off: &OffState, with_hits: bool) -> Vec<OnlineFood> {
+pub(crate) fn online_foods(off: &OffState, with_hits: bool) -> Vec<OnlineFood> {
     let o = off.0.lock().unwrap();
     let mut out = if with_hits { o.hits.clone() } else { vec![] };
     let seen: Vec<String> = out.iter().map(|f| f.code.clone()).collect();
@@ -63,11 +64,31 @@ pub(crate) fn online_food_draft(off: tauri::State<OffState>, code: String) -> Re
     Ok(OnlineDraft { food, ready })
 }
 
-/// Rank the My Foods and online foods for `q` (each lock is dropped before the next is taken).
+fn recipe_food(r: &Recipe) -> RecipeFood {
+    RecipeFood { uid: r.uid.clone(), name: r.name.clone(), per_serving: health::per_serving(r) }
+}
+
+/// The recipes that can be logged as foods: not in the trash, with a uid.
+pub(crate) fn recipe_foods(lib: &Library) -> Vec<RecipeFood> {
+    lib.recipes.iter().filter(|r| !r.in_trash && !r.uid.is_empty()).map(recipe_food).collect()
+}
+
+/// A recipe opened as a food. Takes the library, so a journal write can use it under its own lock.
+pub(crate) fn recipe_detail_in(lib: &Library, uid: &str, us: bool) -> Result<FoodDetail, String> {
+    let r = lib.recipes.iter().find(|r| !r.in_trash && r.uid == uid).ok_or(crate::GONE)?;
+    // grams are offered only when every ingredient weighs (D-08)
+    let serving_g = nutrition::recipe_grams(r).map(|g| g / r.servings_count());
+    Ok(foods::recipe_detail(&recipe_food(r), serving_g, us))
+}
+
+/// Rank the My Foods, recipes and online foods for `q` (each lock is dropped before the next is taken).
 fn rows(shared: &Shared, off: &OffState, q: &str, with_hits: bool) -> Vec<FoodRow> {
-    let mine = shared.lock().unwrap().lib.my_foods.clone();
+    let (mine, recipes) = {
+        let st = shared.lock().unwrap();
+        (st.lib.my_foods.clone(), recipe_foods(&st.lib))
+    };
     let online = online_foods(off, with_hits);
-    foods::search(q, &mine, &online)
+    foods::search_with(q, &mine, &online, &recipes, &[])
 }
 
 /// How an online search went. `status` is `ok`, `empty`, `offline`, `slow`, `limited`, `wait` or `needs_email` (nothing was sent: no contact email is saved); the rows are always the local results plus any hits.
@@ -124,7 +145,15 @@ pub(crate) fn search_foods(state: tauri::State<Shared>, off: tauri::State<OffSta
 }
 
 /// Open a food (a row's key) with its units. Looks in the last online hits too, so an opened online row resolves.
-fn detail_of(shared: &Shared, off: &OffState, key: &str, us: bool) -> Result<FoodDetail, String> {
+pub(crate) fn detail_of(shared: &Shared, off: &OffState, key: &str, us: bool) -> Result<FoodDetail, String> {
+    if let Some(uid) = key.strip_prefix("recipe:") {
+        return recipe_detail_in(&shared.lock().unwrap().lib, uid, us);
+    }
+    // a logged entry: measured against its own frozen basis, never the live food (TRK-04)
+    if let Some(rest) = key.strip_prefix("entry:") {
+        let (day, uid) = rest.split_once(':').ok_or(foods::GONE)?;
+        return recipe_box::tracker::diary::entry_detail(&mut shared.lock().unwrap().journal, day, uid, us);
+    }
     let mine = shared.lock().unwrap().lib.my_foods.clone();
     let online = online_foods(off, true);
     foods::detail(key, &mine, &online, us)
@@ -335,6 +364,49 @@ mod tests {
         assert_eq!(saved(&shared), "me@example.com", "a refused value changes nothing");
         set_email(&shared, "   ").unwrap();
         assert_eq!(saved(&shared), "", "clearing means the next online search asks again");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_key_measures_against_the_frozen_basis() {
+        let d = tdir("entrykey");
+        let shared = with_my_food(&d);
+        let off = OffState::new(&d);
+        crate::diary::log(&shared, &off, "2026-03-10", "2026-03-10", model::MealType::Lunch, "my:7", 1.0, "serving").unwrap();
+        let uid = recipe_box::tracker::diary::day_view(&mut shared.lock().unwrap().journal, "2026-03-10", "2026-03-10").unwrap().slots[1].entries[0].uid.clone();
+        // the live My Food is edited afterwards; the entry keeps what it was logged with
+        shared.lock().unwrap().lib.my_foods[0].per_serving.calories = Some(999.0);
+        let key = format!("entry:2026-03-10:{uid}");
+        let det = detail_of(&shared, &off, &key, false).unwrap();
+        assert_eq!(det.units.iter().map(|u| u.id.as_str()).collect::<Vec<_>>(), ["g", "oz", "serving"]);
+        let m = amount_of(&shared, &off, &key, Some(62.0), "g", None).unwrap();
+        assert_eq!((m.grams, m.nutrients.calories), (Some(62.0), Some(240.0)), "62 g of the frozen 120 kcal per 31 g");
+        assert_eq!(detail_of(&shared, &off, "entry:nope", false).unwrap_err(), "That food isn't in the list any more.");
+        assert!(detail_of(&shared, &off, "entry:2026-02-30:x", false).unwrap_err().contains("isn't a valid date"));
+        assert_eq!(detail_of(&shared, &off, "entry:2026-03-10:nope", false).unwrap_err(), "That entry isn't in the diary any more.");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recipes_are_listed_and_opened_as_foods() {
+        let d = tdir("recipes");
+        let shared = with_my_food(&d);
+        let off = OffState::new(&d);
+        let (uid, name) = {
+            let st = shared.lock().unwrap();
+            let r = st.lib.recipes.iter().find(|r| r.nutrition.is_some()).unwrap();
+            (r.uid.clone(), r.name.clone())
+        };
+        let key = format!("recipe:{uid}");
+        assert!(rows(&shared, &off, &name, false).iter().any(|r| r.key == key && r.tag == "Recipe"), "typed search lists the recipe");
+        assert!(rows(&shared, &off, "", false).iter().all(|r| r.tag == "My Food"), "a blank search is still My Foods only");
+        assert!(rows(&shared, &off, "egg", false).iter().any(|r| r.key.starts_with("db:")));
+        let opened = detail_of(&shared, &off, &key, false).unwrap();
+        assert_eq!((opened.tag, opened.unit.as_str()), ("Recipe", "serving"));
+        assert_eq!(detail_of(&shared, &off, "recipe:nope", false).unwrap_err(), "That recipe isn't in the library any more.");
+        shared.lock().unwrap().lib.recipes.iter_mut().for_each(|r| r.in_trash = true);
+        assert!(recipe_foods(&shared.lock().unwrap().lib).is_empty(), "a recipe in the trash is not a food");
+        assert!(detail_of(&shared, &off, &key, false).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

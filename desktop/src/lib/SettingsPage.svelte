@@ -4,11 +4,13 @@
   import Icon from './Icon.svelte';
   import Dialog from './Dialog.svelte';
   import Logo from './Logo.svelte';
+  import Segmented from './Segmented.svelte';
+  import { chooseTheme, savedTheme, type Theme } from './theme';
   import * as api from './api';
   import { update, checkForUpdate, installUpdate, holdsUnsaved } from './updates.svelte';
   import type { SavedVersion, SettingsInfo } from './api';
 
-  type Tab = 'sync' | 'backup' | 'history' | 'trackers' | 'online' | 'claude' | 'about';
+  type Tab = 'sync' | 'backup' | 'history' | 'trackers' | 'online' | 'claude' | 'appearance' | 'about';
   let { tab = $bindable('sync'), onchanged, onerror, onnote }: {
     tab?: Tab;
     /** the library itself changed (restore, rollback, sync) */
@@ -24,8 +26,11 @@
     ['trackers', 'Health Trackers', 'heart'],
     ['online', 'Online Food Search', 'globe'],
     ['claude', 'Send from Claude', 'out'],
+    ['appearance', 'Appearance', 'moon'],
     ['about', 'About', 'book'],
   ];
+  let look: Theme = $state(savedTheme());
+  const looks: Record<Theme, string> = { system: 'Follow Windows', light: 'Light', dark: 'Dark' };
   let info: SettingsInfo | null = $state(null);
   let folder = $state('');
   // A typed or chip-picked sync folder is lost unless Save & Sync Now is pressed; the other fields here save on blur or change.
@@ -249,6 +254,14 @@
             </li>
           </ol>
           <details><summary>What the instructions say</summary><pre class="selectable">{i.instructions}</pre></details>
+        {:else if tab === 'appearance'}
+          <h2>Choose how Tiffin looks</h2>
+          <p class="lead">Follow Windows switches between light and dark when Windows does. Your choice is kept on this computer.</p>
+          <div class="row">
+            <Segmented label="Appearance" options={['system', 'light', 'dark'] as Theme[]} value={look} onchange={(t) => { look = t; chooseTheme(t); }}>
+              {#snippet item(t)}{looks[t]}{/snippet}
+            </Segmented>
+          </div>
         {:else}
           <div class="about-logo"><Logo width={160} /></div>
           <h2 class="about-h">Tiffin {i.version}</h2>

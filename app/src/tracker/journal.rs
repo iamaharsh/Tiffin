@@ -5,16 +5,32 @@
 use crate::model::{now_secs, MealType, Nutrients};
 use crate::storage::{self, Problem};
 use crate::tracker::day::is_month_key;
+use crate::tracker::{body, goals};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The number that decides whether a month file or profile.json is too new for this build. Bump it
+/// The number that decides whether a month file is too new for this build. Bump it
 /// only for a change an older build would lose when it re-saves one of these files (for example a
 /// new kind of record in month files), exactly as `LIBRARY_FORMAT` does for the library.
-pub const JOURNAL_FORMAT: u32 = 1;
+/// 2: month files hold the complete-day flags (03-02); a format-1 build would drop them when it re-saves or backs up a month, so it opens a format-2 file read-only.
+/// 3: month files hold exercise and body records (04-01); a format-2 build would drop them when it re-saves or backs up a month, so it opens a format-3 file read-only.
+pub const JOURNAL_FORMAT: u32 = 3;
+
+/// profile.json has its own format number, so a month-file change never changes it.
+/// 2: profile.json holds the body details, dated targets, unit choices, custom activities and custom measures (04-01).
+pub const PROFILE_FORMAT: u32 = 2;
+
+/// The format number a journal file is checked against: profile.json has its own.
+fn format_of(key: &str) -> u32 {
+    if key == "profile" {
+        PROFILE_FORMAT
+    } else {
+        JOURNAL_FORMAT
+    }
+}
 
 /// Where a diary entry's food came from. Recipes are referenced by uid, never by numeric id.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
@@ -53,12 +69,110 @@ pub struct DiaryEntry {
     pub grams: Option<f32>,
     pub amount: f32,
     pub unit: String,
-    /// The nutrition the entry was logged with: per 100 g when `per_100g`, otherwise for the whole amount.
+    /// The nutrition the entry was logged with: per 100 g when `per_100g`, otherwise for one `unit` (one serving), and the entry holds `amount` of them.
     pub basis: Nutrients,
     pub per_100g: bool,
 }
 
-/// One month's diary. Month files will gain exercise and body records the same way, with a `JOURNAL_FORMAT` bump.
+/// What was exercised with. A source names where the activity came from; the numbers it was logged with
+/// are in the entry's [`ExerciseBasis`], so a later change to a table or a custom activity never moves a logged one.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub enum ExerciseSource {
+    /// A row of the bundled activity table (`mets.tsv`), by its id.
+    Compendium(String),
+    /// One of the user's own activities, by `CustomActivity.uid`.
+    Custom(String),
+    /// Reserved for the future Workouts tab (D-17d); nothing writes it yet.
+    Workout(String),
+}
+
+impl Default for ExerciseSource {
+    fn default() -> Self {
+        ExerciseSource::Custom(String::new())
+    }
+}
+
+/// How an activity turns minutes into energy.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub enum ExerciseBasis {
+    /// A MET value; the energy above resting is (MET - 1) x kg x hours.
+    Met(f64),
+    /// Net kcal an hour, already above resting.
+    KcalPerHour(f64),
+}
+
+impl Default for ExerciseBasis {
+    fn default() -> Self {
+        ExerciseBasis::Met(1.0)
+    }
+}
+
+/// One logged workout. Frozen at log time (D-17b): the shown kcal is `kcal_override` or else `est_kcal`;
+/// None is unknown, never 0.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct ExerciseEntry {
+    pub uid: String,
+    /// A valid `YYYY-MM-DD` day (see `Day::parse`).
+    pub day: String,
+    pub logged_at: u64,
+    pub modified: u64,
+    /// Set when the entry is deleted, so a deletion survives a sync merge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
+    pub name: String,
+    pub source: ExerciseSource,
+    pub basis: ExerciseBasis,
+    pub minutes: f64,
+    /// The body weight the estimate was made with, when there was one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight_kg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub est_kcal: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kcal_override: Option<f64>,
+}
+
+/// One body measurement. `value` is canonical (kg, cm, percent or a plain number) and converted only at the
+/// edge; there is one live entry per (day, measure).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct BodyEntry {
+    pub uid: String,
+    pub day: String,
+    pub logged_at: u64,
+    pub modified: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
+    /// A `body::BUILT_IN` id or a `CustomMeasure.uid`.
+    pub measure: String,
+    pub value: f64,
+}
+
+/// An activity the user made up, kept apart from the cited table (D-15).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct CustomActivity {
+    pub uid: String,
+    pub name: String,
+    pub basis: ExerciseBasis,
+}
+
+/// What one diary change replaced, so it can be put back. `before` holds the entries as they were and
+/// `added` the uids the change created. The exercise and body lists do the same for those records: one undo covers
+/// food, exercise and body together, so Copy Yesterday is one step back (D-17c).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DiaryUndo {
+    pub day: String,
+    pub before: Vec<DiaryEntry>,
+    pub added: Vec<String>,
+    pub before_exercise: Vec<ExerciseEntry>,
+    pub added_exercise: Vec<String>,
+    pub before_body: Vec<BodyEntry>,
+    pub added_body: Vec<String>,
+}
+
+/// One month: the diary, the workouts and the body measurements logged in it (exercise and body are format 3).
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct JournalMonth {
@@ -66,24 +180,82 @@ pub struct JournalMonth {
     /// `YYYY-MM`
     pub month: String,
     pub entries: Vec<DiaryEntry>,
+    /// The days (`YYYY-MM-DD`) marked complete. A day stays editable.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub complete: BTreeSet<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exercise: Vec<ExerciseEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub body: Vec<BodyEntry>,
 }
 
 impl Default for JournalMonth {
     fn default() -> Self {
-        JournalMonth { format: JOURNAL_FORMAT, month: String::new(), entries: vec![] }
+        JournalMonth { format: JOURNAL_FORMAT, month: String::new(), entries: vec![], complete: BTreeSet::new(), exercise: vec![], body: vec![] }
     }
 }
 
-/// The user's body details and targets. Only the format for now; the goal engine fills it in.
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+fn is_default_rate(v: &f64) -> bool {
+    *v == DEFAULT_RATE_KG_WEEK
+}
+
+/// The weekly rate a new profile starts with.
+const DEFAULT_RATE_KG_WEEK: f64 = 0.5;
+
+/// The user's body details, goal, dated targets and own lists. There is no weight field: the body log is the
+/// only source of weight (D-06), so a weight is never typed twice. Heights, weights and rates are kg or cm;
+/// the unit is in the name or the type and a value is converted only at the edge.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Profile {
     pub format: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sex: Option<goals::Sex>,
+    /// `YYYY-MM-DD`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birth_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_cm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<goals::Activity>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub goal: goals::GoalKind,
+    /// The weekly change asked for, in kg a week, whatever unit the page shows.
+    #[serde(skip_serializing_if = "is_default_rate")]
+    pub rate_kg_week: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_weight_kg: Option<f64>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub units: goals::UnitChoice,
+    /// Dated full snapshots, ascending by `effective_from`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<goals::TargetSet>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub activities: Vec<CustomActivity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measures: Vec<body::CustomMeasure>,
 }
 
 impl Default for Profile {
     fn default() -> Self {
-        Profile { format: JOURNAL_FORMAT }
+        Profile {
+            format: PROFILE_FORMAT,
+            sex: None,
+            birth_date: None,
+            height_cm: None,
+            activity: None,
+            goal: goals::GoalKind::default(),
+            rate_kg_week: DEFAULT_RATE_KG_WEEK,
+            goal_weight_kg: None,
+            units: goals::UnitChoice::default(),
+            targets: vec![],
+            activities: vec![],
+            measures: vec![],
+        }
     }
 }
 
@@ -112,20 +284,33 @@ pub struct Journal {
     pub recovered: Vec<(String, Option<PathBuf>)>,
     /// When each file last got a history snapshot, by key.
     last_snapshot: BTreeMap<String, u64>,
+    /// The pending one-level undo. It lives here, not on the app state, so opening a new journal (a backup restore) drops it.
+    undo: Option<DiaryUndo>,
+    /// The undo as of the last good save; [`Journal::discard_unsaved`] puts it back.
+    saved_undo: Option<DiaryUndo>,
 }
+
+/// Only the format of a journal file, read without caring what else it holds.
+#[derive(Deserialize)]
+struct Header {
+    #[serde(default)]
+    format: u32,
+}
+
+const NO_UPGRADE_COPY: &str = "Couldn't keep a copy of this diary month before updating it, so nothing was saved. Make sure the data folder isn't full, then try again.";
 
 /// What reading one journal file found.
 enum FileRead<T> {
     Missing,
     Ok(T),
     Bad,
-    /// `format` above [`JOURNAL_FORMAT`]; holds the version that wrote it.
+    /// `format` above what this build reads; holds the version that wrote it.
     TooNew(String),
 }
 
-fn read_file<T: DeserializeOwned>(path: &Path) -> FileRead<T> {
+fn read_file<T: DeserializeOwned>(path: &Path, current: u32) -> FileRead<T> {
     match fs::read(path) {
-        Ok(bytes) => match storage::newer_than(&bytes, JOURNAL_FORMAT) {
+        Ok(bytes) => match storage::newer_than(&bytes, current) {
             Some(found) => FileRead::TooNew(found),
             None => serde_json::from_slice(&bytes).map_or(FileRead::Bad, FileRead::Ok),
         },
@@ -137,7 +322,30 @@ fn read_file<T: DeserializeOwned>(path: &Path) -> FileRead<T> {
 impl Journal {
     /// A journal over a folder. Reads nothing.
     pub fn open(dir: PathBuf) -> Journal {
-        Journal { dir, months: BTreeMap::new(), dirty: BTreeSet::new(), profile: None, profile_dirty: false, problems: vec![], recovered: vec![], last_snapshot: BTreeMap::new() }
+        Journal { dir, months: BTreeMap::new(), dirty: BTreeSet::new(), profile: None, profile_dirty: false, problems: vec![], recovered: vec![], last_snapshot: BTreeMap::new(), undo: None, saved_undo: None }
+    }
+
+    /// Keep `u` as the one pending undo. The slot changes only together with a successful save.
+    pub fn set_undo(&mut self, u: DiaryUndo) {
+        self.undo = Some(u);
+    }
+
+    /// Take the pending undo, leaving none.
+    pub fn take_undo(&mut self) -> Option<DiaryUndo> {
+        self.undo.take()
+    }
+
+    /// After a failed change, make memory match the files again: every changed month is dropped (the next read
+    /// loads it from disk), the profile too, and the pending undo goes back to the one from the last good save.
+    pub fn discard_unsaved(&mut self) {
+        for m in std::mem::take(&mut self.dirty) {
+            self.months.remove(&m);
+        }
+        if self.profile_dirty {
+            self.profile = None;
+            self.profile_dirty = false;
+        }
+        self.undo = self.saved_undo.clone();
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -166,10 +374,11 @@ impl Journal {
         let main = self.path(key);
         let bak = main.with_extension("json.bak");
         let too_new = |found| Problem::TooNew { found, partial: false };
-        match read_file::<T>(&main) {
+        let cur = format_of(key);
+        match read_file::<T>(&main, cur) {
             FileRead::Ok(v) => Ok(v),
             FileRead::TooNew(found) => Err(self.lock(key, too_new(found))), // never read or touch the .bak
-            FileRead::Missing => match read_file::<T>(&bak) {
+            FileRead::Missing => match read_file::<T>(&bak, cur) {
                 FileRead::Ok(v) => {
                     self.recovered.push((key.into(), None));
                     Ok(v)
@@ -183,7 +392,7 @@ impl Journal {
             },
             FileRead::Bad => {
                 let kept = storage::quarantine(&main).ok();
-                match read_file::<T>(&bak) {
+                match read_file::<T>(&bak, cur) {
                     FileRead::Ok(v) if kept.is_some() => {
                         self.recovered.push((key.into(), kept));
                         Ok(v)
@@ -224,19 +433,35 @@ impl Journal {
     pub fn month_mut(&mut self, m: &str) -> Result<&mut JournalMonth, String> {
         self.ensure_month(m)?;
         self.dirty.insert(m.into());
-        Ok(self.months.get_mut(m).unwrap())
+        let month = self.months.get_mut(m).unwrap();
+        month.format = JOURNAL_FORMAT; // a month this build changes is written in this build's format
+        Ok(month)
     }
 
-    /// The profile for changing; marked changed. Err while profile.json is locked.
-    pub fn profile_mut(&mut self) -> Result<&mut Profile, String> {
+    fn ensure_profile(&mut self) -> Result<(), String> {
         if let Some(p) = self.locked("profile") {
             return Err(p.refusal().into());
         }
         if self.profile.is_none() {
             self.profile = Some(self.load("profile", Profile::default())?);
         }
+        Ok(())
+    }
+
+    /// The profile for reading. The diary reads it on every view, and a read must never rewrite profile.json,
+    /// so this does not mark it changed. Err while profile.json is locked.
+    pub fn profile(&mut self) -> Result<&Profile, String> {
+        self.ensure_profile()?;
+        Ok(self.profile.as_ref().unwrap())
+    }
+
+    /// The profile for changing; marked changed. Err while profile.json is locked.
+    pub fn profile_mut(&mut self) -> Result<&mut Profile, String> {
+        self.ensure_profile()?;
         self.profile_dirty = true;
-        Ok(self.profile.as_mut().unwrap())
+        let p = self.profile.as_mut().unwrap();
+        p.format = PROFILE_FORMAT; // a profile this build changes is written in this build's format
+        Ok(p)
     }
 
     /// Write every changed month and the profile. Each file is read again first, so what is on disk
@@ -263,6 +488,9 @@ impl Journal {
             }
             first_err = first_err.or(r.err());
         }
+        if first_err.is_none() {
+            self.saved_undo = self.undo.clone();
+        }
         first_err.map_or(Ok(()), Err)
     }
 
@@ -275,10 +503,15 @@ impl Journal {
             return Err("Couldn't save the diary: it holds a number that can't be stored. Your earlier entries are untouched.".into());
         }
         let path = self.path(key);
-        let keep_bak = match read_file::<T>(&path) {
+        let keep_bak = match read_file::<T>(&path, format_of(key)) {
             FileRead::Missing => false,
             FileRead::Ok(_) => {
-                self.snapshot_if_due(key, &path);
+                // a file in an older format is copied first whatever the snapshot window says, and a failed copy stops the write (snapshot before migrations)
+                if fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Header>(&b).ok()).is_some_and(|h| h.format < format_of(key)) {
+                    self.copy_to_history(key, &path).map_err(|_| NO_UPGRADE_COPY.to_string())?;
+                } else {
+                    self.snapshot_if_due(key, &path);
+                }
                 true
             }
             FileRead::Bad => {
@@ -298,9 +531,16 @@ impl Journal {
             return;
         }
         self.last_snapshot.insert(key.into(), now);
+        let _ = self.copy_to_history(key, path);
+    }
+
+    /// Copy the file's exact bytes to `history/<key>-<secs>.json`, then drop the oldest beyond [`JOURNAL_SNAPSHOTS_KEPT`].
+    fn copy_to_history(&mut self, key: &str, path: &Path) -> Result<(), String> {
+        let now = now_secs();
         let hist = self.dir.join("history");
-        if let Ok(bytes) = fs::read(path) {
-            let _ = storage::write_atomic(&hist.join(format!("{key}-{now}.json")), &bytes, false);
+        let copied = fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| storage::write_atomic(&hist.join(format!("{key}-{now}.json")), &bytes, false));
+        if copied.is_ok() {
+            self.last_snapshot.insert(key.into(), now);
         }
         let prefix = format!("{key}-");
         let mut mine: Vec<(u64, PathBuf)> = fs::read_dir(&hist)
@@ -317,6 +557,7 @@ impl Journal {
         for (_, old) in mine.iter().take(mine.len().saturating_sub(JOURNAL_SNAPSHOTS_KEPT)) {
             let _ = fs::remove_file(old);
         }
+        copied
     }
 
     /// The months that have a file, sorted. Only `YYYY-MM.json` counts: backups, temp files, damaged copies, the profile and the history folder are ignored.
@@ -329,6 +570,13 @@ impl Journal {
             .collect();
         out.sort();
         out
+    }
+
+    /// Every month that has a file or is held in memory (a month changed but not yet saved counts), sorted.
+    pub fn months_with_data(&self) -> Vec<String> {
+        let mut out: BTreeSet<String> = self.months_on_disk().into_iter().collect();
+        out.extend(self.months.keys().cloned());
+        out.into_iter().collect()
     }
 }
 
@@ -349,7 +597,7 @@ pub fn bundle_from_disk(dir: &Path) -> (Option<JournalBundle>, Vec<String>) {
     let mut b = JournalBundle::default();
     let mut left_out = vec![];
     for key in Journal::open(dir.to_path_buf()).months_on_disk() {
-        match read_file::<JournalMonth>(&dir.join(format!("{key}.json"))) {
+        match read_file::<JournalMonth>(&dir.join(format!("{key}.json")), JOURNAL_FORMAT) {
             FileRead::Ok(m) => {
                 b.months.insert(key, m);
             }
@@ -357,7 +605,7 @@ pub fn bundle_from_disk(dir: &Path) -> (Option<JournalBundle>, Vec<String>) {
             _ => left_out.push(key),
         }
     }
-    match read_file::<Profile>(&dir.join("profile.json")) {
+    match read_file::<Profile>(&dir.join("profile.json"), PROFILE_FORMAT) {
         FileRead::Ok(p) => b.profile = Some(p),
         FileRead::Missing => {}
         _ => left_out.push("profile".into()),
@@ -372,7 +620,7 @@ pub fn check_bundle(b: &JournalBundle) -> Result<(), String> {
     if let Some(bad) = b.months.keys().find(|k| !is_month_key(k)) {
         return Err(format!("This backup has a diary month with a bad name ({bad}), so nothing was restored."));
     }
-    if b.months.values().any(|m| m.format > JOURNAL_FORMAT) || b.profile.as_ref().is_some_and(|p| p.format > JOURNAL_FORMAT) {
+    if b.months.values().any(|m| m.format > JOURNAL_FORMAT) || b.profile.as_ref().is_some_and(|p| p.format > PROFILE_FORMAT) {
         return Err(storage::NEWER_BACKUP.into());
     }
     Ok(())
@@ -450,6 +698,258 @@ mod tests {
         assert!(j.save_dirty().is_err());
         assert_eq!(fs::read(d.join("2026-11.json")).unwrap(), before, "the good file is left alone");
         assert!(copies(&d, "2026-11").is_empty(), "and nothing is quarantined");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn failed_change_is_not_kept_in_memory() {
+        let d = tdir("rollback");
+        let mut j = Journal::open(d.clone());
+        j.month_mut("2026-11").unwrap().entries.push(entry("A"));
+        j.save_dirty().unwrap();
+        j.month_mut("2026-11").unwrap().entries.push(DiaryEntry { amount: f32::INFINITY, ..entry("Bad") });
+        assert!(j.save_dirty().is_err());
+        j.discard_unsaved();
+        let names = |j: &mut Journal| j.month("2026-11").unwrap().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&mut j), ["A"], "read from disk again");
+        j.month_mut("2026-11").unwrap().entries.push(entry("B"));
+        j.save_dirty().unwrap();
+        assert_eq!(names(&mut Journal::open(d.clone())), ["A", "B"], "the next good change saves without the bad entry");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn undo_slot_follows_the_last_good_save() {
+        let d = tdir("undoslot");
+        let mut j = Journal::open(d.clone());
+        let u = |day: &str| DiaryUndo { day: day.into(), ..Default::default() };
+        j.month_mut("2026-11").unwrap().entries.push(entry("A"));
+        j.set_undo(u("x"));
+        j.save_dirty().unwrap();
+        j.month_mut("2026-11").unwrap().entries.push(DiaryEntry { amount: f32::INFINITY, ..entry("Bad") });
+        j.set_undo(u("y"));
+        assert!(j.save_dirty().is_err());
+        j.discard_unsaved();
+        assert_eq!(j.take_undo(), Some(u("x")));
+        assert_eq!(j.take_undo(), None);
+        j.set_undo(u("z"));
+        assert_eq!(Journal::open(d.clone()).take_undo(), None, "a fresh journal (a restore) has no undo");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    const FORMAT_1: &str = r#"{"format": 1, "month": "2026-11", "entries": [{"uid": "u1", "day": "2026-11-13", "name": "Soup"}]}"#;
+
+    fn history_files(d: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(d.join("history")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn older_month_loads_and_is_written_in_the_current_format() {
+        let d = tdir("fmt1");
+        fs::write(d.join("2026-11.json"), FORMAT_1).unwrap();
+        let mut j = Journal::open(d.clone());
+        let m = j.month("2026-11").unwrap();
+        assert_eq!((m.entries.len(), m.complete.len(), m.format), (1, 0, 1));
+        j.month_mut("2026-11").unwrap().entries.push(entry("Tea"));
+        j.save_dirty().unwrap();
+        let text = fs::read_to_string(d.join("2026-11.json")).unwrap();
+        assert!(text.contains("\"format\": 3") && !text.contains("complete"), "{text}");
+        // a format-2 build opens it read-only
+        assert!(storage::newer_than(text.as_bytes(), 2).is_some());
+        assert_eq!(Journal::open(d.clone()).month("2026-11").unwrap().entries.len(), 2);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn complete_days_round_trip() {
+        let d = tdir("complete");
+        let mut j = Journal::open(d.clone());
+        j.month_mut("2026-11").unwrap().complete.insert("2026-11-15".into());
+        j.save_dirty().unwrap();
+        let text = fs::read_to_string(d.join("2026-11.json")).unwrap();
+        assert!(text.contains("\"complete\"") && text.contains("2026-11-15"));
+        assert!(Journal::open(d.clone()).month("2026-11").unwrap().complete.contains("2026-11-15"));
+        j.month_mut("2026-11").unwrap().complete.clear();
+        j.save_dirty().unwrap();
+        assert!(!fs::read_to_string(d.join("2026-11.json")).unwrap().contains("complete"), "the key is written only while a day is set");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn format_upgrade_is_copied_inside_the_snapshot_window() {
+        let d = tdir("upgrade");
+        fs::write(d.join("2026-11.json"), FORMAT_1).unwrap();
+        let mut j = Journal::open(d.clone());
+        j.last_snapshot.insert("2026-11".into(), now_secs()); // inside the 6 h window
+        j.month_mut("2026-11").unwrap().entries.push(entry("Tea"));
+        j.save_dirty().unwrap();
+        let h = history_files(&d);
+        assert_eq!(h.len(), 1);
+        assert_eq!(fs::read(&h[0]).unwrap(), FORMAT_1.as_bytes(), "exactly the format-1 bytes");
+        assert!(fs::read_to_string(d.join("2026-11.json")).unwrap().contains("\"format\": 3"));
+        // the next save is the current format already, so the window applies again
+        j.month_mut("2026-11").unwrap().entries.push(entry("More"));
+        j.save_dirty().unwrap();
+        assert_eq!(history_files(&d).len(), 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn format_upgrade_refused_when_its_copy_fails() {
+        let d = tdir("upgrade-fail");
+        fs::write(d.join("2026-11.json"), FORMAT_1).unwrap();
+        fs::write(d.join("history"), "in the way").unwrap(); // a file where the folder must go
+        let mut j = Journal::open(d.clone());
+        j.month_mut("2026-11").unwrap().entries.push(entry("Tea"));
+        assert_eq!(j.save_dirty().unwrap_err(), NO_UPGRADE_COPY);
+        assert_eq!(fs::read(d.join("2026-11.json")).unwrap(), FORMAT_1.as_bytes(), "the old file is as it was");
+        j.discard_unsaved();
+        assert_eq!(j.month("2026-11").unwrap().entries.len(), 1, "the day reads as it did on disk");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn profile_keeps_its_own_format() {
+        let d = tdir("profile-format");
+        let mut j = Journal::open(d.clone());
+        j.profile_mut().unwrap();
+        j.month_mut("2026-11").unwrap();
+        j.save_dirty().unwrap();
+        assert!(fs::read_to_string(d.join("profile.json")).unwrap().contains("\"format\": 2"));
+        assert!(fs::read_to_string(d.join("2026-11.json")).unwrap().contains("\"format\": 3"));
+        assert_eq!((PROFILE_FORMAT, JOURNAL_FORMAT), (2, 3));
+        fs::write(d.join("profile.json"), r#"{"format": 3}"#).unwrap();
+        assert_eq!(Journal::open(d.clone()).profile_mut().err(), Some(storage::READ_ONLY.to_string()));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    const FORMAT_2: &str = r#"{"format": 2, "month": "2026-11", "entries": [{"uid": "u1", "day": "2026-11-13", "name": "Soup"}]}"#;
+
+    #[test]
+    fn format_2_month_gains_exercise_and_body_after_a_history_copy() {
+        let d = tdir("fmt2");
+        fs::write(d.join("2026-11.json"), FORMAT_2).unwrap();
+        let mut j = Journal::open(d.clone());
+        j.last_snapshot.insert("2026-11".into(), now_secs()); // inside the 6 h window: the copy is still made
+        let m = j.month_mut("2026-11").unwrap();
+        m.exercise.push(ExerciseEntry { uid: "x1".into(), day: "2026-11-13".into(), name: "Walk".into(), minutes: 30.0, est_kcal: Some(90.0), ..Default::default() });
+        m.body.push(BodyEntry { uid: "b1".into(), day: "2026-11-13".into(), measure: "weight".into(), value: 80.0, ..Default::default() });
+        j.save_dirty().unwrap();
+        let h = history_files(&d);
+        assert_eq!(h.len(), 1);
+        assert_eq!(fs::read(&h[0]).unwrap(), FORMAT_2.as_bytes(), "exactly the format-2 bytes");
+        let back = Journal::open(d.clone()).month("2026-11").unwrap().clone();
+        assert_eq!((back.entries.len(), back.exercise.len(), back.body.len(), back.format), (1, 1, 1, 3));
+        assert_eq!(back.exercise[0].est_kcal, Some(90.0));
+        assert!(storage::newer_than(fs::read_to_string(d.join("2026-11.json")).unwrap().as_bytes(), 2).is_some(), "a format-2 build opens it read-only");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn month_without_new_records_has_no_new_keys() {
+        let d = tdir("nonew");
+        let mut j = Journal::open(d.clone());
+        j.month_mut("2026-11").unwrap().entries.push(entry("Soup"));
+        j.save_dirty().unwrap();
+        let text = fs::read_to_string(d.join("2026-11.json")).unwrap();
+        assert!(!text.contains("exercise") && !text.contains("body"), "{text}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn profile_read_never_dirties_it() {
+        let d = tdir("profile-read");
+        let mut j = Journal::open(d.clone());
+        assert_eq!(j.profile().unwrap(), &Profile::default());
+        j.save_dirty().unwrap();
+        assert!(!d.join("profile.json").exists(), "reading the profile writes nothing");
+        // a profile with nothing set writes only its format
+        j.profile_mut().unwrap();
+        j.save_dirty().unwrap();
+        assert_eq!(fs::read_to_string(d.join("profile.json")).unwrap().split_whitespace().collect::<String>(), r#"{"format":2}"#);
+        // a format-1 profile is read without a rewrite, and its first rewrite copies the old bytes
+        let old = r#"{"format": 1}"#;
+        fs::write(d.join("profile.json"), old).unwrap();
+        let mut k = Journal::open(d.clone());
+        k.profile().unwrap();
+        k.save_dirty().unwrap();
+        assert_eq!(fs::read(d.join("profile.json")).unwrap(), old.as_bytes());
+        assert!(history_files(&d).is_empty());
+        k.profile_mut().unwrap().height_cm = Some(180.0);
+        k.save_dirty().unwrap();
+        let h = history_files(&d);
+        assert_eq!((h.len(), fs::read(&h[0]).unwrap()), (1, old.as_bytes().to_vec()));
+        let text = fs::read_to_string(d.join("profile.json")).unwrap();
+        assert!(text.contains("\"format\": 2") && text.contains("180"), "{text}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bundle_carries_exercise_body_and_targets() {
+        let (a, b) = (tdir("bundle-src"), tdir("bundle-dst"));
+        let mut j = Journal::open(a.clone());
+        let m = j.month_mut("2026-11").unwrap();
+        m.entries.push(entry("Soup"));
+        m.exercise.push(ExerciseEntry { uid: "x1".into(), day: "2026-11-13".into(), name: "Walk".into(), minutes: 30.0, est_kcal: Some(90.0), ..Default::default() });
+        m.body.push(BodyEntry { uid: "b1".into(), day: "2026-11-13".into(), measure: "weight".into(), value: 80.25, ..Default::default() });
+        let target = goals::TargetSet { effective_from: "2026-11-13".into(), kcal: 2100, templates: vec![goals::Template { id: 1, name: "Training".into(), kcal_offset: 300, ..Default::default() }], week: [None, Some(1), None, None, None, None, None], ..Default::default() };
+        let p = j.profile_mut().unwrap();
+        p.height_cm = Some(180.34);
+        p.targets.push(target);
+        j.save_dirty().unwrap();
+
+        let (bundle, left_out) = bundle_from_disk(&a);
+        let bundle = bundle.unwrap();
+        assert!(left_out.is_empty());
+        let text = serde_json::to_string(&bundle).unwrap();
+        assert!(text.contains("Walk") && text.contains("80.25") && text.contains("Training") && text.contains("180.34"), "{text}");
+        restore_bundle(&b, &bundle).unwrap();
+        let (mut from, mut to) = (Journal::open(a.clone()), Journal::open(b.clone()));
+        assert_eq!(to.month("2026-11").unwrap(), from.month("2026-11").unwrap());
+        assert_eq!(to.profile().unwrap(), from.profile().unwrap());
+        assert_eq!((to.month("2026-11").unwrap().exercise.len(), to.month("2026-11").unwrap().body.len(), to.profile().unwrap().targets.len()), (1, 1, 1));
+        for x in [&a, &b] {
+            let _ = fs::remove_dir_all(x);
+        }
+    }
+
+    #[test]
+    fn old_backup_formats_restore_and_upgrade() {
+        let d = tdir("oldbackup");
+        let mut bundle = JournalBundle::default();
+        bundle.months.insert("2026-11".into(), serde_json::from_str(FORMAT_2).unwrap());
+        bundle.profile = Some(serde_json::from_str(r#"{"format": 1}"#).unwrap());
+        assert_eq!((bundle.months["2026-11"].format, bundle.profile.as_ref().unwrap().format), (2, 1), "the old formats are kept as they were read");
+        check_bundle(&bundle).unwrap();
+        restore_bundle(&d, &bundle).unwrap();
+        let (old_month, old_profile) = (fs::read(d.join("2026-11.json")).unwrap(), fs::read(d.join("profile.json")).unwrap());
+        assert!(String::from_utf8_lossy(&old_month).contains("\"format\": 2") && String::from_utf8_lossy(&old_profile).contains("\"format\": 1"));
+
+        // the first change after the restore copies both old files and writes the new formats
+        let mut j = Journal::open(d.clone());
+        j.last_snapshot.insert("2026-11".into(), now_secs()); // inside the 6 h window: the copy is still made
+        j.last_snapshot.insert("profile".into(), now_secs());
+        j.month_mut("2026-11").unwrap().body.push(BodyEntry { uid: "b1".into(), day: "2026-11-13".into(), measure: "weight".into(), value: 80.0, ..Default::default() });
+        j.profile_mut().unwrap().height_cm = Some(180.0);
+        j.save_dirty().unwrap();
+        let kept: Vec<Vec<u8>> = history_files(&d).iter().map(|p| fs::read(p).unwrap()).collect();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.contains(&old_month) && kept.contains(&old_profile), "both old files copied byte for byte");
+        assert!(fs::read_to_string(d.join("2026-11.json")).unwrap().contains("\"format\": 3"));
+        assert!(fs::read_to_string(d.join("profile.json")).unwrap().contains("\"format\": 2"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn months_with_data_counts_unsaved_months() {
+        let d = tdir("withdata");
+        let mut j = Journal::open(d.clone());
+        j.month_mut("2026-10").unwrap().entries.push(entry("A"));
+        j.save_dirty().unwrap();
+        j.month_mut("2026-12").unwrap().entries.push(entry("B"));
+        assert_eq!(j.months_with_data(), ["2026-10", "2026-12"]);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -629,7 +1129,7 @@ mod tests {
         let mut p = Journal::open(g.clone());
         p.profile_mut().unwrap();
         p.save_dirty().unwrap();
-        assert_eq!(Journal::open(g.clone()).profile_mut().unwrap().format, JOURNAL_FORMAT);
+        assert_eq!(Journal::open(g.clone()).profile_mut().unwrap().format, PROFILE_FORMAT);
         for x in [d, n, g] {
             let _ = fs::remove_dir_all(&x);
         }

@@ -45,8 +45,12 @@
     if (status) said = status(o);
   }
 
+  // nothing chosen yet (a required choice): the first segment takes the Tab stop, and the arrows start from either end
+  const none = $derived(!options.includes(value));
+
   function keys(e: KeyboardEvent) {
-    const next = step(e.key, options.indexOf(value), options.length);
+    const at = none ? (e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? 0 : options.length - 1) : options.indexOf(value);
+    const next = step(e.key, at, options.length);
     if (next === null) return;
     e.preventDefault();
     pick(options[next]);
@@ -61,7 +65,7 @@
       bind:this={buttons[i]}
       role="radio"
       aria-checked={o === value}
-      tabindex={o === value ? 0 : -1}
+      tabindex={o === value || (none && i === 0) ? 0 : -1}
       class:sel={o === value}
       onclick={() => pick(o)}><span class="face">{@render item(o)}</span><span class="sizer" aria-hidden="true">{@render item(o)}</span></button
     >

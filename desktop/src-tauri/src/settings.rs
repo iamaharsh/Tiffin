@@ -610,7 +610,12 @@ mod tests {
         shared.lock().unwrap().lib.settings.sync_folder = d.join("sync").display().to_string();
         let sentinel = DiaryEntry { day: "2026-11-13".into(), name: "SENTINEL-DIARY-7731".into(), basis: Nutrients { calories: Some(100.0), ..Default::default() }, ..Default::default() };
         crate::mutate_journal(&shared, |st| {
-            st.journal.month_mut("2026-11")?.entries.push(sentinel.clone());
+            let m = st.journal.month_mut("2026-11")?;
+            m.entries.push(sentinel.clone());
+            m.exercise.push(journal::ExerciseEntry { uid: "x1".into(), day: "2026-11-13".into(), name: "SENTINEL-EXERCISE-4411".into(), minutes: 30.0, est_kcal: Some(90.0), ..Default::default() });
+            m.body.push(journal::BodyEntry { uid: "b1".into(), day: "2026-11-13".into(), measure: "waist".into(), value: 123.456, ..Default::default() });
+            let template = recipe_box::tracker::goals::Template { id: 1, name: "SENTINEL-TEMPLATE-5523".into(), kcal_offset: 300, ..Default::default() };
+            st.journal.profile_mut()?.targets.push(recipe_box::tracker::goals::TargetSet { effective_from: "2026-11-13".into(), kcal: 2100, templates: vec![template], ..Default::default() });
             Ok(())
         })
         .unwrap();
@@ -621,10 +626,16 @@ mod tests {
         let full = std::fs::read_dir(d.join("backups")).unwrap().flatten().next().unwrap().path();
         let text = std::fs::read_to_string(&full).unwrap();
         assert!(text.contains("SENTINEL-DIARY-7731") && text.contains("\"journal\""));
+        for marker in ["SENTINEL-EXERCISE-4411", "SENTINEL-TEMPLATE-5523", "123.456"] {
+            assert!(text.contains(marker), "the full backup holds {marker}");
+        }
         assert_eq!(storage::read_backup(&full).unwrap().journal.unwrap().months.keys().collect::<Vec<_>>(), vec!["2026-11"]);
         let synced = std::fs::read_dir(d.join("sync")).unwrap().flatten().next().unwrap().path();
         let text = std::fs::read_to_string(&synced).unwrap();
-        assert!(!text.contains("SENTINEL-DIARY-7731") && !text.contains("journal"));
+        for marker in ["SENTINEL-DIARY-7731", "SENTINEL-EXERCISE-4411", "SENTINEL-TEMPLATE-5523", "123.456"] {
+            assert!(!text.contains(marker), "the sync-folder copy never holds {marker}");
+        }
+        assert!(!text.contains("journal"));
         assert!(storage::read_backup(&synced).unwrap().journal.is_none());
 
         // a damaged month is left out and named; the backup still happens
@@ -733,13 +744,26 @@ mod tests {
         log(&shared, "2026-10", "A");
         log(&shared, "2026-11", "B");
         std::fs::write(d.join("journal").join("2026-09.json"), "{\"entries\": [").unwrap();
+        // the current profile, so the copy folder has an old profile.json to keep
+        crate::mutate_journal(&shared, |st| {
+            st.journal.profile_mut()?.height_cm = Some(170.0);
+            Ok(())
+        })
+        .unwrap();
         let before: std::collections::BTreeMap<_, _> = journal_files(&d).into_iter().collect();
-        let p = storage::backup_with_photos(&model::sample_library(model::today()), &d.join("src"), None, Some(&bundle(&[("2026-11", "C")]))).unwrap();
+        assert!(before.contains_key("profile.json"));
+        // the backup's month also holds a workout and a measurement, and its profile one target
+        let mut restored = bundle(&[("2026-11", "C")]);
+        let month = restored.months.get_mut("2026-11").unwrap();
+        month.exercise.push(journal::ExerciseEntry { uid: "x1".into(), day: "2026-11-13".into(), name: "Walk".into(), minutes: 30.0, est_kcal: Some(90.0), ..Default::default() });
+        month.body.push(journal::BodyEntry { uid: "b1".into(), day: "2026-11-13".into(), measure: "weight".into(), value: 80.0, ..Default::default() });
+        restored.profile = Some(journal::Profile { targets: vec![recipe_box::tracker::goals::TargetSet { effective_from: "2026-11-13".into(), kcal: 1900, ..Default::default() }], ..Default::default() });
+        let p = storage::backup_with_photos(&model::sample_library(model::today()), &d.join("src"), None, Some(&restored)).unwrap();
         let msg = restore_file(&shared, &p, true, &d.join("backups")).unwrap();
         assert!(msg.contains("food diary"), "{msg}");
         // the backup's month replaced the current one; the months it lacks were moved, not deleted
         let now: Vec<String> = journal_files(&d).into_iter().map(|(n, _)| n).filter(|n| n.ends_with(".json")).collect();
-        assert_eq!(now, vec!["2026-11.json".to_string()]);
+        assert_eq!(now, vec!["2026-11.json".to_string(), "profile.json".to_string()]);
         let copy = restore_copies(&d);
         assert_eq!(copy.len(), 1);
         for (name, bytes) in &before {
@@ -749,8 +773,16 @@ mod tests {
         let saved: Vec<_> = std::fs::read_dir(d.join("backups")).unwrap().flatten().map(|e| storage::read_backup(&e.path()).unwrap()).collect();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].journal.as_ref().unwrap().months.keys().collect::<Vec<_>>(), vec!["2026-10", "2026-11"]);
-        // the open diary reads the restored month
-        assert_eq!(shared.lock().unwrap().journal.month("2026-11").unwrap().entries[0].name, "C");
+        assert_eq!(saved[0].journal.as_ref().unwrap().profile.as_ref().and_then(|p| p.height_cm), Some(170.0), "the old profile is in that backup too");
+        // the open diary reads the restored month, with its workout, measurement and target
+        let mut g = shared.lock().unwrap();
+        let m = g.journal.month("2026-11").unwrap().clone();
+        assert_eq!((m.entries[0].name.as_str(), m.exercise.len(), m.body.len()), ("C", 1, 1));
+        assert_eq!((m.exercise[0].name.as_str(), m.body[0].value), ("Walk", 80.0));
+        let targets = g.journal.profile().unwrap().targets.clone();
+        assert_eq!(targets.iter().map(|t| t.kcal).collect::<Vec<_>>(), [1900]);
+        assert_eq!(g.journal.profile().unwrap().height_cm, None, "the backup's profile replaced the current one");
+        drop(g);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -776,11 +808,15 @@ mod tests {
         evil.months.insert("../../x".into(), journal::JournalMonth::default());
         let mut newer = bundle(&[("2026-11", "C")]);
         newer.months.get_mut("2026-11").unwrap().format = journal::JOURNAL_FORMAT + 1;
+        let mut newer_profile = bundle(&[("2026-11", "C")]);
+        newer_profile.profile = Some(journal::Profile { format: journal::PROFILE_FORMAT + 1, ..Default::default() });
         let lib = model::sample_library(model::today());
         let p = storage::backup_with_photos(&lib, &d.join("evil"), None, Some(&evil)).unwrap();
         assert!(restore_file(&shared, &p, true, &d.join("backups")).unwrap_err().contains("bad name"));
         let q = storage::backup_with_photos(&lib, &d.join("newer"), None, Some(&newer)).unwrap();
         assert_eq!(restore_file(&shared, &q, true, &d.join("backups")), Err(storage::NEWER_BACKUP.to_string()));
+        let r = storage::backup_with_photos(&lib, &d.join("newer-profile"), None, Some(&newer_profile)).unwrap();
+        assert_eq!(restore_file(&shared, &r, true, &d.join("backups")), Err(storage::NEWER_BACKUP.to_string()), "a newer profile is refused too");
         assert_eq!(std::fs::read(d.join("library.json")).unwrap(), lib_before);
         assert_eq!(journal_files(&d), journal_before);
         assert!(!d.join("backups").exists() && restore_copies(&d).is_empty() && !d.join("x.json").exists());

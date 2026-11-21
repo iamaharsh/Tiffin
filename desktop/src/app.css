@@ -9,7 +9,7 @@
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   /* surfaces */
   --sidebar: #f3e9da;
@@ -52,6 +52,10 @@
   --warn: #8a5700;
   --warn-wash: #fbebcb;
 
+  /* text on an accent or danger fill, and the hairline under it */
+  --on-accent: #ffffff;
+  --btn-edge: rgba(0, 0, 0, 0.15);
+
   /* section tiles (white icon on top) */
   --tile-recipes: #e4572e;
   --tile-browser: #2f7de1;
@@ -60,6 +64,12 @@
   --tile-foods: #6a9a1f;
   --tile-meals: #8e5bd9;
   --tile-menus: #d6336c;
+  --tile-diary: #0F9AB8;
+  --tile-targets: #4F5FD8;
+  --tile-body: #139585;
+  /* page-title inks for Targets and Body: the tile pulled toward the text colour, so the mix follows the theme */
+  --targets-ink: color-mix(in srgb, var(--tile-targets), var(--ink) 35%);
+  --body-ink: color-mix(in srgb, var(--tile-body), var(--ink) 35%);
 
   /* macros */
   --protein: #2f7de1;
@@ -86,36 +96,36 @@
   --font-label: 'Barlow Condensed', 'Segoe UI', sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --sidebar: #211810;
-    --sidebar-hover: rgba(255, 240, 225, 0.06);
-    --page: #2b2118;
-    --card: #382b20;
-    --well: #33271d;
-    --toolbar: rgba(43, 33, 24, 0.78);
-    --rule: rgba(255, 240, 225, 0.08);
-    --rule-strong: rgba(255, 240, 225, 0.15);
-    --ink: #fff6e9;
-    --ink-2: #c9bba8;
-    --ink-3: #a89a87; /* ≥ 4.5:1 on every dark surface */
-    --accent-text: #e8806a;
-    --accent-wash: #4a2a20;
-    --focus-ring: #e8806a;
-    --brand: #fff6e9; /* one-colour rule for dark */
-    --leaf: #9cae5c;
-    --olive-text: #9cae5c;
-    --pill: #4a3b2d;
-    --heart: #ff5c74;
-    --star-off: #4a4541;
-    --ok: #5cc98a;
-    --warn: #e4a850;
-    --warn-wash: #4a3716;
-    --label-lift: 45%;
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.3), 0 12px 28px rgba(0, 0, 0, 0.4);
-    --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-  }
+/* set by lib/theme.ts from Settings › Appearance, or from Windows on Follow Windows */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --sidebar: #211810;
+  --sidebar-hover: rgba(255, 240, 225, 0.06);
+  --page: #2b2118;
+  --card: #382b20;
+  --well: #33271d;
+  --toolbar: rgba(43, 33, 24, 0.78);
+  --rule: rgba(255, 240, 225, 0.08);
+  --rule-strong: rgba(255, 240, 225, 0.15);
+  --ink: #fff6e9;
+  --ink-2: #c9bba8;
+  --ink-3: #a89a87; /* ≥ 4.5:1 on every dark surface */
+  --accent-text: #e8806a;
+  --accent-wash: #4a2a20;
+  --focus-ring: #e8806a;
+  --brand: #fff6e9; /* one-colour rule for dark */
+  --leaf: #9cae5c;
+  --olive-text: #9cae5c;
+  --pill: #4a3b2d;
+  --heart: #ff5c74;
+  --star-off: #4a4541;
+  --ok: #5cc98a;
+  --warn: #e4a850;
+  --warn-wash: #4a3716;
+  --label-lift: 45%;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.3), 0 12px 28px rgba(0, 0, 0, 0.4);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 * { box-sizing: border-box; }
@@ -151,6 +161,33 @@ button {
   padding: 0;
   cursor: default;
 }
+
+/* The shared button, written once: secondary by default, .primary and .danger filled, .ghost text only.
+   A component with its own .btn keeps it (scoped rules win). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 84px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: 14.5px;
+  font-weight: 600;
+  background: var(--well);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  transition: background-color 120ms ease-out, transform 100ms ease-out;
+}
+.btn:hover { background: var(--rule); }
+.btn:active { transform: scale(0.97); }
+.btn.primary { background: var(--accent); color: var(--on-accent); box-shadow: inset 0 -1px 0 var(--btn-edge); }
+.btn.primary:hover { background: var(--accent-press); }
+.btn.danger { background: var(--heart); color: var(--on-accent); box-shadow: none; }
+.btn.ghost { min-width: 0; background: none; color: var(--accent-text); box-shadow: none; }
+.btn.ghost:hover { background: none; text-decoration: underline; }
+.btn:disabled { opacity: 0.5; transform: none; }
 
 :focus-visible {
   outline: 2px solid var(--focus-ring);

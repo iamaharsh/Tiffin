@@ -2,11 +2,11 @@
   import Icon from './Icon.svelte';
   import type { FoodTag } from './api';
 
-  // Where a food comes from. Neutral on purpose: accent colour stays for things you can press.
-  let { tag }: { tag: FoodTag } = $props();
+  // Where a food or an activity comes from, or a label like "edited" or a weekday template's name. Neutral on purpose: accent colour stays for things you can press.
+  let { tag, title }: { tag: FoodTag | string; title?: string } = $props();
 </script>
 
-<span class="tag caps">{#if tag === 'Open Food Facts'}<Icon name="globe" size={12} />{/if}{tag}</span>
+<span class="tag caps" {title}>{#if tag === 'Open Food Facts'}<Icon name="globe" size={12} />{/if}{tag}</span>
 
 <style>
   .tag {

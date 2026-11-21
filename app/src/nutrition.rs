@@ -994,6 +994,17 @@ pub fn calculate(r: &Recipe) -> NutritionResult {
     res
 }
 
+/// What the whole recipe's ingredients weigh in grams, or None when that is not known: its nutrition was typed in by hand, a line
+/// was skipped, or no line counted. Raw ingredient weight, so it is the "weight known from its matched ingredients" of D-08.
+pub fn recipe_grams(r: &Recipe) -> Option<f32> {
+    if r.nutrition_edited {
+        return None;
+    }
+    let c = calculate(r);
+    let g: f32 = c.lines.iter().filter_map(|l| l.grams).sum();
+    (c.counted > 0 && c.skipped == 0 && g > 0.0).then_some(g)
+}
+
 /// A recipe total from per-serving values typed in by hand: a blank stays unknown, a typed 0 stays 0, a negative becomes 0, a non-finite value is unknown.
 pub fn hand_typed(per_serving: &Nutrients, servings: f32) -> Nutrients {
     let f = |v: Option<f32>| v.map(|v| v * servings).filter(|v| v.is_finite()).map(|v| v.max(0.0));
@@ -1039,11 +1050,17 @@ fn my_food_slot(lib: &Library, f: &MyFood) -> Option<usize> {
 
 /// Add a food to My Foods, or replace one, then re-estimate. A food with an id replaces that id only
 /// (so a rename never lands on another food); a new food (id 0) replaces the one with the same name.
+/// Renaming keeps the old name in the aliases, so diary history (`FoodRef::MyFood` holds the name) and recipes written with it still find the food.
 pub fn save_my_food(lib: &mut Library, mut f: MyFood) {
     f.modified = now_secs();
     match my_food_slot(lib, &f) {
         Some(i) => {
             f.id = lib.my_foods[i].id;
+            let old = lib.my_foods[i].name.trim();
+            if !old.is_empty() && !old.eq_ignore_ascii_case(f.name.trim()) && !f.aliases.split(',').any(|a| a.trim().eq_ignore_ascii_case(old)) {
+                let kept = f.aliases.trim().trim_end_matches(',');
+                f.aliases = if kept.is_empty() { old.to_string() } else { format!("{kept}, {old}") };
+            }
             lib.my_foods[i] = f;
         }
         None => {
@@ -1348,5 +1365,36 @@ mod tests {
         assert!(r.lines[0].grams.unwrap() > 100.0);
         let r = calculate(&Recipe { ingredients: "2 tbsp nutritional yeast".into(), ..Default::default() });
         assert!(r.lines[0].grams.unwrap() < 10.0);
+    }
+
+    #[test]
+    fn recipe_weight_known_only_when_every_line_weighs() {
+        let r = |ings: &str, edited: bool| Recipe { ingredients: ings.into(), servings: "2".into(), nutrition_edited: edited, ..Default::default() };
+        let g = recipe_grams(&r("200 g chicken breast
+100 g rice", false)).expect("both lines weigh");
+        assert!((g - 300.0).abs() < 1.0, "{g}");
+        assert_eq!(recipe_grams(&r("200 g chicken breast
+100 g rice", true)), None, "typed by hand");
+        assert!(recipe_grams(&r("200 g chicken breast
+salt and pepper to taste", false)).is_some(), "a small amount is not a skipped line");
+        assert_eq!(recipe_grams(&r("200 g chicken breast
+3 widgets", false)), None, "a skipped line");
+        assert_eq!(recipe_grams(&r("3 widgets", false)), None, "nothing counted");
+    }
+
+    #[test]
+    fn renaming_a_my_food_keeps_the_old_name_as_an_alias() {
+        // odd names: save_my_food sets the estimator's global My Foods, which other tests share
+        let mut lib = Library::default();
+        save_my_food(&mut lib, MyFood { name: "Zxq whey".into(), serving_g: 31.0, ..Default::default() });
+        let id = lib.my_foods[0].id;
+        save_my_food(&mut lib, MyFood { id, name: "Zxq vanilla whey".into(), aliases: "zxqalias".into(), serving_g: 31.0, ..Default::default() });
+        assert_eq!((lib.my_foods[0].name.as_str(), lib.my_foods[0].aliases.as_str()), ("Zxq vanilla whey", "zxqalias, Zxq whey"));
+        let kept = lib.my_foods[0].aliases.clone();
+        save_my_food(&mut lib, MyFood { id, name: "Zxq vanilla whey".into(), aliases: kept.clone(), serving_g: 31.0, ..Default::default() });
+        assert_eq!(lib.my_foods[0].aliases, "zxqalias, Zxq whey", "saving again adds nothing");
+        save_my_food(&mut lib, MyFood { id, name: "ZXQ VANILLA WHEY".into(), aliases: kept, serving_g: 31.0, ..Default::default() });
+        assert_eq!(lib.my_foods[0].aliases, "zxqalias, Zxq whey", "a case change is not a rename");
+        set_my_foods(&[]);
     }
 }

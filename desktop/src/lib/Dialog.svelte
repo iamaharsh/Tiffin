@@ -3,7 +3,8 @@
 
   // A sheet over the window: the browser's own modal <dialog>, so focus stays inside, Esc
   // closes it and the page behind can't be clicked.
-  let { title, onclose, children, actions, wide = false }: { title: string; onclose: () => void; children: Snippet; actions: Snippet; wide?: boolean } = $props();
+  /** `oncancel` is what Esc does when that differs from clicking outside (the Add Food dialog undoes typed text first) */
+  let { title, onclose, oncancel, children, actions, wide = false, large = false }: { title: string; onclose: () => void; oncancel?: () => void; children: Snippet; actions: Snippet; wide?: boolean; large?: boolean } = $props();
 
   let el: HTMLDialogElement;
   $effect(() => {
@@ -15,8 +16,9 @@
 <dialog
   bind:this={el}
   class:wide
+  class:large
   aria-label={title}
-  oncancel={(e) => { e.preventDefault(); onclose(); }}
+  oncancel={(e) => { e.preventDefault(); (oncancel ?? onclose)(); }}
   onclick={(e) => { if (e.target === el) onclose(); }}
 >
   <div class="sheet">
@@ -40,37 +42,17 @@
     animation: sheet-in 260ms var(--ease-out);
   }
   dialog.wide { width: min(560px, calc(100vw - 32px)); }
+  dialog.large { width: min(760px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(20, 14, 8, 0.32); animation: fade-in 200ms ease-out; }
   @keyframes sheet-in { from { opacity: 0; transform: translateY(12px) scale(0.98); } }
   @keyframes fade-in { from { opacity: 0; } }
-  .sheet { display: flex; flex-direction: column; gap: 14px; padding: 22px 24px 20px; }
+  /* the sheet takes the dialog's own height limit, so the title and buttons stay put and only the body scrolls */
+  .sheet { display: flex; flex-direction: column; gap: 14px; max-height: inherit; padding: 22px 24px 20px; }
   h2 { margin: 0; font: 700 19px/1.25 var(--font-display); letter-spacing: -0.01em; }
-  .body { display: flex; flex-direction: column; gap: 12px; font-size: 14px; color: var(--ink-2); }
+  .body { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; font-size: 14px; color: var(--ink-2); }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
-  /* buttons and fields used inside every sheet */
-  .sheet :global(.btn) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-width: 84px;
-    height: 34px;
-    padding: 0 16px;
-    border-radius: 9px;
-    font-size: 14px;
-    font-weight: 500;
-    background: var(--well);
-    color: var(--ink);
-    box-shadow: inset 0 0 0 1px var(--rule);
-    transition: background-color 120ms ease-out, transform 100ms ease-out;
-  }
-  .sheet :global(.btn:hover) { background: var(--rule); }
-  .sheet :global(.btn:active) { transform: scale(0.97); }
-  .sheet :global(.btn.primary) { background: var(--accent); color: #fff; box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15); }
-  .sheet :global(.btn.primary:hover) { background: var(--accent-press); }
-  .sheet :global(.btn.danger) { background: var(--heart); color: #fff; box-shadow: none; }
-  .sheet :global(.btn:disabled) { opacity: 0.5; transform: none; }
+  /* fields used inside every sheet (the buttons are global, in app.css) */
   .sheet :global(input:not([type='checkbox'], [type='radio'])), .sheet :global(select) {
     width: 100%;
     height: 34px;

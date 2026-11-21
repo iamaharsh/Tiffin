@@ -7,11 +7,21 @@ const css = readFileSync(fileURLToPath(new URL('../src/app.css', import.meta.url
 // Value of every `--name: #hex` inside one block of text.
 const hexes = (block) => Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[0-9a-f]{6})\b/gi)].map((m) => [m[1], m[2]]));
 
-// The light :root block runs to the first closing brace; the dark one sits in the dark media query.
-const lightBlock = css.slice(css.indexOf(':root {'), css.indexOf('@media (prefers-color-scheme: dark)'));
-const darkBlock = css.slice(css.indexOf('@media (prefers-color-scheme: dark)'), css.indexOf('* { box-sizing'));
+// The light :root block runs to the first closing brace; the dark one is the :root[data-theme='dark'] block.
+const lightBlock = css.slice(css.indexOf(':root {'), css.indexOf(":root[data-theme='dark'] {"));
+const darkBlock = css.slice(css.indexOf(":root[data-theme='dark'] {"), css.indexOf('* { box-sizing'));
 const light = hexes(lightBlock);
 const dark = { ...light, ...hexes(darkBlock) }; // dark falls back to light for tokens it does not set
+
+// `--name: color-mix(in srgb, var(--a), var(--b) N%)` is resolved per mode from the hex tokens (sRGB, gamma-encoded, as CSS does).
+const mixes = [...lightBlock.matchAll(/(--[\w-]+):\s*color-mix\(in srgb,\s*var\((--[\w-]+)\),\s*var\((--[\w-]+)\)\s*(\d+)%\)/g)];
+for (const tokens of [light, dark]) {
+  for (const [, name, a, b, pct] of mixes) {
+    const at = (hex, i) => parseInt(hex.slice(i, i + 2), 16);
+    const mixed = [1, 3, 5].map((i) => Math.round(at(tokens[a], i) * (1 - pct / 100) + at(tokens[b], i) * (pct / 100)));
+    tokens[name] = '#' + mixed.map((v) => v.toString(16).padStart(2, '0')).join('');
+  }
+}
 
 // WCAG 2 relative luminance of an sRGB colour.
 const channel = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
@@ -45,6 +55,10 @@ add('--focus-ring', ['--page'], mark);
 add('--brand', ['--page', '--sidebar'], mark);
 add('--toast-act', [TOAST], text);
 add('--toast-ok', [TOAST], text);
+add('--targets-ink', ['--page'], text);
+add('--body-ink', ['--page'], text);
+add(WHITE, ['--tile-targets'], mark);
+add(WHITE, ['--tile-body'], mark);
 
 let failed = false;
 for (const [fg, bg, min, modes] of pairs) {

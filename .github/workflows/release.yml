@@ -52,6 +52,14 @@ jobs:
         run: npm ci
         working-directory: desktop
 
+      - name: UI checks
+        run: npm run check:ui
+        working-directory: desktop
+
+      # The Compendium maintainers' permission to embed the full MET table is pending (IN-06): only the stand-in may ship.
+      - name: Only the MET stand-in ships
+        run: python -I app/tools/build_mets.py --check-release app/data/mets.tsv
+
       - name: Tests gate the release
         run: |
           cargo test --manifest-path app/Cargo.toml
@@ -72,3 +80,15 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.release.conf.json
+
+      # tauri-action writes api.github.com asset links into latest.json; this step points them at the direct download (G-02.1-6).
+      - name: Updater feed links straight to the download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir feed
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > feed/release.json
+          node desktop/tools/direct-feed-urls.mjs feed/latest.json feed/release.json "$GITHUB_REPOSITORY" "$TAG"
+          gh release upload "$TAG" feed/latest.json --repo "$GITHUB_REPOSITORY" --clobber

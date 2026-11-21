@@ -2,6 +2,7 @@
 
 use crate::{mutate, Shared};
 use recipe_box::model::{self, Meal, MealType};
+use recipe_box::tracker::diary;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -11,23 +12,27 @@ pub(crate) struct MealOut {
     label: Option<usize>,
     photo: String,
     seed: u32,
+    /** the diary has a live entry for this meal's recipe on its day */
+    eaten: bool,
 }
 
 /// Meals between two days (inclusive), with what the page needs to draw each recipe.
 #[tauri::command]
 pub(crate) fn meals(state: tauri::State<Shared>, from: i32, to: i32) -> Vec<MealOut> {
-    let s = state.lock().unwrap();
-    let lib = &s.lib;
-    let mut v: Vec<MealOut> = lib
-        .meals
-        .iter()
-        .filter(|m| m.day >= from && m.day <= to)
+    let mut guard = state.lock().unwrap();
+    let st = &mut *guard;
+    let lib = &st.lib;
+    let range: Vec<&Meal> = lib.meals.iter().filter(|m| m.day >= from && m.day <= to).collect();
+    let eaten = diary::eaten(&mut st.journal, &range, |id| lib.recipe(id).map(|r| r.uid.clone()));
+    let mut v: Vec<MealOut> = range
+        .into_iter()
         .map(|m| {
             let r = m.recipe_id.and_then(|id| lib.recipe(id));
             MealOut {
                 label: r.and_then(|r| model::recipe_label(&lib.label_colors, &r.categories).1),
                 photo: r.map(|r| r.photo.clone()).unwrap_or_default(),
                 seed: r.map_or(1, |r| r.photo_seed),
+                eaten: eaten.contains(&m.id),
                 meal: m.clone(),
             }
         })

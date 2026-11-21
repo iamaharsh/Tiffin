@@ -7,13 +7,17 @@
 
   // One food: pick an amount and a unit, see calories and macros. The crate does all unit math
   // and rounding; this page only shows its answers. `actions` is where later plans add buttons.
-  let { key, us, onerror, named = true, actions }: {
+  let { key, us, onerror, named = true, name = '', actions, onenter }: {
     key: string;
     us: boolean;
     onerror: (m: string) => void;
     /** false when the surrounding dialog already shows the name */
     named?: boolean;
+    /** the name the row already showed, so the panel is never blank while the food loads */
+    name?: string;
     actions?: Snippet<[Info]>;
+    /** Enter in the Amount box: the host does what its primary button does */
+    onenter?: (d: Info) => void;
   } = $props();
 
   let detail: Info | null = $state(null);
@@ -29,6 +33,14 @@
   /** Focus the Amount box with its text selected, so typing replaces it (waits for the food to load). */
   export function focusAmount() {
     if (amountBox) { amountBox.focus(); amountBox.select(); } else wantFocus = true;
+  }
+  /** The amount and unit now in the box (0 while empty or still loading), for hosts that keep their own buttons, like Edit Entry. */
+  export function current(): { amount: number; unit: string } {
+    return { amount: amount ?? 0, unit };
+  }
+  /** The open food with the amount and unit now chosen, or null while loading, for a host that keeps its own Add button. */
+  export function food(): Info | null {
+    return chosen;
   }
   $effect(() => {
     if (amountBox && wantFocus) { wantFocus = false; amountBox.focus(); amountBox.select(); }
@@ -88,6 +100,17 @@
     }
   }
 
+  // actions get the food with the amount and unit now chosen, not its defaults
+  const chosen = $derived.by(() => {
+    const d = detail;
+    return d ? { ...d, amount: amount ?? 0, unit } : null;
+  });
+  function amountKeys(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || !chosen) return;
+    e.preventDefault();
+    onenter?.(chosen);
+  }
+
   // an empty or zero amount has no figures at all
   const live = $derived(amount ? result : null);
   const n = $derived(live?.nutrients ?? {});
@@ -110,12 +133,18 @@
       {/if}
     </header>
 
+    {#if detail.warning}
+      <p class="fine caution"><Icon name="warn" size={16} />{detail.warning}</p>
+    {/if}
+    {#if detail.note}<p class="fine note">{detail.note}</p>{/if}
+
     <div class="amountrow">
       <label class="field amt">Amount
         <input
           bind:this={amountBox}
           bind:value={amount}
           oninput={typed}
+          onkeydown={amountKeys}
           class="num"
           type="number"
           min="0"
@@ -152,7 +181,10 @@
       </ul>
     </section>
 
-    {#if actions}<div class="actions">{@render actions(detail)}</div>{/if}
+    {#if actions && chosen}<div class="actions">{@render actions(chosen)}</div>{/if}
+  {:else}
+    {#if named && name}<h3 title={name}>{name}</h3>{/if}
+    <p class="fine">Loading amounts…</p>
   {/if}
 </div>
 
@@ -173,6 +205,7 @@
   .fine { font-size: 13px; line-height: 1.4; color: var(--ink-2); }
   .caution { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--warn); }
   .caution :global(svg) { flex: none; margin-top: 2px; }
+  .note { margin: 0; }
 
   .amountrow { display: flex; gap: 8px; align-items: flex-end; }
   .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; font-size: 13px; line-height: 1.4; color: var(--ink-2); }
@@ -190,7 +223,7 @@
     font-size: 14.5px;
     outline: none;
   }
-  .field input.num { font-size: 16px; font-family: var(--font-label); }
+  .field input.num { font-size: 14.5px; font-weight: 600; font-family: var(--font-label); }
   .field input:focus, .field select:focus { box-shadow: 0 0 0 3px var(--focus), inset 0 0 0 1px var(--accent); }
 
   .weight { display: flex; align-items: center; gap: 8px; margin: -4px 0 0; }
