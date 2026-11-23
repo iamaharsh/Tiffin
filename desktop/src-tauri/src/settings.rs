@@ -4,7 +4,7 @@
 use crate::{mutate, replace_library, replace_library_then, AppState, Shared};
 use recipe_box::model::{self, Library, MyFood};
 use recipe_box::tracker::journal;
-use recipe_box::{cooking, health, importer, inbox, labels, nutrition, selftest, storage};
+use recipe_box::{cooking, credits, health, importer, inbox, labels, nutrition, selftest, storage};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +32,8 @@ pub(crate) struct Info {
     instructions: String,
     recipes: usize,
     favorites: usize,
+    /// the data sources credited on the About screen
+    sources: Vec<credits::Source>,
 }
 
 #[tauri::command]
@@ -49,7 +51,7 @@ pub(crate) fn settings_info(state: tauri::State<Shared>) -> Info {
         last_sync: set.last_sync.map(storage::fmt_stamp),
         onedrive,
         dropbox,
-        backups_dir: storage::backups_dir().display().to_string(),
+        backups_dir: storage::backups_dir(&s.store.dir).display().to_string(),
         tracker_service: set.tracker_service.clone(),
         tracker_folder: set.tracker_folder.clone(),
         tracker_default: health::default_folder(&set.tracker_service).display().to_string(),
@@ -62,6 +64,7 @@ pub(crate) fn settings_info(state: tauri::State<Shared>) -> Info {
         instructions: inbox::claude_instructions(),
         recipes: s.lib.recipes.iter().filter(|r| !r.in_trash).count(),
         favorites: s.lib.recipes.iter().filter(|r| r.favorite && !r.in_trash).count(),
+        sources: credits::data_sources(),
     }
 }
 
@@ -75,6 +78,18 @@ pub(crate) struct Change {
     tracker_service: Option<String>,
     tracker_folder: Option<String>,
     tracker_auto_send: Option<bool>,
+}
+
+/// Store the sidebar's tab order; an id that isn't a tab refuses the whole change.
+#[tauri::command]
+pub(crate) fn set_sidebar_order(state: tauri::State<Shared>, order: Vec<String>) -> Result<(), String> {
+    mutate(&state, |st| recipe_box::sidebar::set_order(&mut st.lib.settings, &order))
+}
+
+/// Make a tab the one Tiffin opens on.
+#[tauri::command]
+pub(crate) fn set_launch_page(state: tauri::State<Shared>, page: String) -> Result<(), String> {
+    mutate(&state, |st| recipe_box::sidebar::set_launch_page(&mut st.lib.settings, &page))
 }
 
 #[tauri::command]
@@ -123,14 +138,33 @@ pub(crate) async fn auto_sync(state: tauri::State<'_, Shared>) -> Result<Option<
     sync_now(state).await.map(Some)
 }
 
-/// One-file backup in Documents\Tiffin Backups, plus a library-only copy in the sync folder if set.
+/// One-file backup in Documents\Tiffin Backups (a test copy's own Backups folder), plus a library-only copy in the sync folder if set.
 #[tauri::command]
 pub(crate) async fn backup_now(state: tauri::State<'_, Shared>) -> Result<String, String> {
-    let (lib, photos, jdir) = {
+    let (lib, photos, jdir, into) = {
         let s = state.lock().unwrap();
-        backup_parts(&s)?
+        let (lib, photos, jdir) = backup_parts(&s)?;
+        (lib, photos, jdir, storage::backups_dir(&s.store.dir))
     };
-    tauri::async_runtime::spawn_blocking(move || backup_into(&lib, &photos, &jdir, &storage::backups_dir())).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || backup_into(&lib, &photos, &jdir, &into)).await.map_err(|e| e.to_string())?
+}
+
+/// Delete all health data: the journal folder and the diary in every backup. The lock is held throughout, so no
+/// diary change can write a cached month back; it runs off the main thread because large backups take a while.
+#[tauri::command]
+pub(crate) async fn delete_health_data(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<Shared>();
+        let mut st = state.lock().unwrap();
+        let dir = journal::journal_dir(&st.store.dir);
+        let out = journal::delete_all(&dir, &storage::backup_dirs(&st.store.dir, &sync_dirs(&st.lib)));
+        // a fresh journal either way: it reads what is left on disk and drops the undo
+        st.journal = journal::Journal::open(dir);
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// What a backup is made from: the library, the photos folder and the journal folder. Refuses while
@@ -180,8 +214,8 @@ pub(crate) fn backups(state: tauri::State<Shared>, picked: Option<String>) -> Re
     if let Some(text) = picked {
         return picked_backup(&text).map(|r| vec![r]);
     }
-    let extra = sync_dirs(&state.lock().unwrap().lib);
-    Ok(storage::list_backups(&extra)
+    let (data, extra) = { let s = state.lock().unwrap(); (s.store.dir.clone(), sync_dirs(&s.lib)) };
+    Ok(storage::list_backups(&data, &extra)
         .into_iter()
         .take(15)
         .map(|(p, created, n, has_diary)| Saved { path: p.display().to_string(), when: storage::fmt_stamp(created), recipes: n, reason: String::new(), favorites: 0, has_diary })
@@ -238,7 +272,7 @@ pub(crate) fn restore_backup(state: tauri::State<Shared>, path: Option<String>, 
     let file = match (path, text) {
         (Some(p), _) => {
             let p = PathBuf::from(p);
-            let known = storage::list_backups(&sync_dirs(&state.lock().unwrap().lib)).into_iter().any(|(b, _, _, _)| b == p);
+            let known = { let s = state.lock().unwrap(); storage::list_backups(&s.store.dir, &sync_dirs(&s.lib)) }.into_iter().any(|(b, _, _, _)| b == p);
             if !known {
                 return Err("That backup isn't in the list any more.".into());
             }
@@ -251,7 +285,8 @@ pub(crate) fn restore_backup(state: tauri::State<Shared>, path: Option<String>, 
         }
         _ => return Err("Choose a backup first.".into()),
     };
-    restore_file(&state, &file, everything, &storage::backups_dir())
+    let backups = storage::backups_dir(&state.lock().unwrap().store.dir);
+    restore_file(&state, &file, everything, &backups)
 }
 
 /// The restore itself, split from the command so a test can drive it. A library or diary from a newer
@@ -386,7 +421,7 @@ pub(crate) fn setup_inbox() -> Result<String, String> {
 pub(crate) fn open_folder(state: tauri::State<Shared>, which: String) -> Result<(), String> {
     let dir = match which.as_str() {
         "inbox" => inbox::inbox_dir(),
-        "backups" => storage::backups_dir(),
+        "backups" => storage::backups_dir(&state.lock().unwrap().store.dir),
         "tracker" => {
             let set = &state.lock().unwrap().lib.settings;
             health::folder_for(&set.tracker_service, &set.tracker_folder)
@@ -431,11 +466,13 @@ pub(crate) struct Guess {
     food: MyFood,
     source: String,
     missing: Vec<&'static str>,
+    /// Sentences to check against the pack before saving (a misread-looking value, a weight worked out from ml).
+    check: Vec<&'static str>,
 }
 
 impl From<labels::LabelGuess> for Guess {
     fn from(g: labels::LabelGuess) -> Self {
-        Guess { food: g.food, source: g.source, missing: g.missing }
+        Guess { food: g.food, source: g.source, missing: g.missing, check: g.check }
     }
 }
 

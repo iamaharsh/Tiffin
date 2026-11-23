@@ -59,6 +59,10 @@ add('--targets-ink', ['--page'], text);
 add('--body-ink', ['--page'], text);
 add(WHITE, ['--tile-targets'], mark);
 add(WHITE, ['--tile-body'], mark);
+add('--home-ink', ['--page'], text);
+add(WHITE, ['--tile-home'], mark);
+add('--reports-ink', ['--page'], text);
+add(WHITE, ['--tile-reports'], mark);
 
 let failed = false;
 for (const [fg, bg, min, modes] of pairs) {

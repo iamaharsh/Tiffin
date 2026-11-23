@@ -1,12 +1,13 @@
 [package]
 name = "tiffin"
-version = "0.3.0"
+version = "0.4.0"
 description = "Tiffin: the desktop app (Tauri)"
 edition = "2021"
 
 [lib]
 name = "recipe_box_desktop"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# shortcut: rlib only, since the Windows GNU linker can't export more than 65,535 symbols from the debug cdylib; add "staticlib" and "cdylib" back when the iOS/Android milestone starts.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }

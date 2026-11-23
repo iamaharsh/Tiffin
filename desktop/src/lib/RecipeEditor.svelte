@@ -261,7 +261,7 @@
   .btn.primary { min-width: 76px; justify-content: center; background: var(--accent); color: #fff; box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15); }
   .btn.primary:hover { background: var(--accent-press); }
   .btn.primary:disabled { opacity: 0.6; }
-  .btn.danger { background: var(--heart); color: #fff; box-shadow: none; }
+  .btn.danger { background: var(--heart); color: var(--on-heart); box-shadow: none; }
 
   .edit { max-width: 980px; margin: 0 auto; padding: 28px 0 80px; display: flex; flex-direction: column; gap: 28px; }
   .top { display: flex; gap: 28px; }

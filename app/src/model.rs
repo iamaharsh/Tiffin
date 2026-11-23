@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 /// nutrients (left out of the file) to My Foods and to recipe nutrition, and pieces to My Foods;
 /// an older build would turn them into 0 and drop them. Recipe nutrition joined format 2 in 02-08,
 /// before any format-2 build was installed, so it needed no bump: an old file's plain numbers load as known.
-pub const LIBRARY_FORMAT: u32 = 2;
+/// Format 3 adds a barcode to My Foods; an older build would drop it.
+pub const LIBRARY_FORMAT: u32 = 3;
 
 pub const CUISINES_PARENT: &str = "Cuisines";
 /// World cuisines offered as sub-categories of "Cuisines".
@@ -251,6 +252,8 @@ pub struct MyFood {
     pub piece_g: f32,
     /// Where the numbers came from ("Photo of the label", "Open Food Facts, barcode …").
     pub source: String,
+    /// The pack's barcode (EAN-13, UPC-A or EAN-8 digits), so scanning it again finds this food; empty when not known. Added in format 3.
+    pub barcode: String,
     pub modified: u64,
 }
 
@@ -460,6 +463,10 @@ pub struct Settings {
     pub grocery_by_recipe: bool,
     /// The person's contact email for Open Food Facts requests; empty until they give one. Sent only to Open Food Facts.
     pub off_email: String,
+    /// The sidebar's tab order as the person arranged it; empty is the default order. Read it through `sidebar::order`.
+    pub sidebar_order: Vec<String>,
+    /// The tab Tiffin opens on; empty is Home. Read it through `sidebar::launch_page`.
+    pub launch_page: String,
 }
 
 impl Default for Settings {
@@ -481,6 +488,8 @@ impl Default for Settings {
             pantry_sort: 0,
             grocery_by_recipe: false,
             off_email: String::new(),
+            sidebar_order: vec![],
+            launch_page: String::new(),
         }
     }
 }

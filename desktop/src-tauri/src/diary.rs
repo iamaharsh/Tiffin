@@ -89,6 +89,10 @@ pub(crate) struct DiaryFoods {
     frequent: Vec<FoodRow>,
     rows: Vec<FoodRow>,
     online_ready: bool,
+    /// the query is a barcode's digits, so an empty answer offers the label photo, not a spelling hint
+    barcode: bool,
+    /// the barcode itself, cleaned up (a typed UPC-E as its UPC-A), or None when the digits don't add up
+    code: Option<String>,
 }
 
 /// Local only: the bundled foods, My Foods, recipes and cached online products. The online products are read first so that lock is gone before `Shared` is taken.
@@ -106,7 +110,7 @@ pub(crate) fn foods_for(shared: &Shared, off: &OffState, q: &str, today: &str, d
     // a planned row is listed once, under Planned
     history.recent.retain(|r| !planned.iter().any(|p| p.key == r.key));
     history.frequent.retain(|r| !planned.iter().any(|p| p.key == r.key));
-    Ok(DiaryFoods { planned, rows: foods::search_with(q, &mine, &online, &recipes, &logged), online_ready: off::query_ready(q), recent: history.recent, frequent: history.frequent })
+    Ok(DiaryFoods { planned, rows: foods::search_with(q, &mine, &online, &recipes, &logged), online_ready: off::query_ready(q), barcode: off::barcode_in(q).is_some(), code: off::barcode_in(q).and_then(Result::ok), recent: history.recent, frequent: history.frequent })
 }
 
 /// One day's meals and totals. `day` and `today` are the page's local days (`YYYY-MM-DD`).
@@ -590,6 +594,13 @@ mod tests {
         let f = foods_for(&shared, &off, "egg", "2026-03-10", "2026-03-10", MealType::Snack).unwrap();
         assert_eq!(f.rows[0].key, egg, "a food logged before leads its ties");
         assert!(f.online_ready);
+        assert!(!f.barcode);
+        // a barcode's digits are flagged, whether or not they add up, so the empty answer offers the label photo
+        assert!(foods_for(&shared, &off, "815074022915", "2026-03-10", "2026-03-10", MealType::Snack).unwrap().barcode);
+        let bad = foods_for(&shared, &off, "815074022914", "2026-03-10", "2026-03-10", MealType::Snack).unwrap();
+        assert!(bad.barcode && bad.code.is_none(), "digits that don't add up are never kept with a food");
+        // a typed UPC-E is kept as the UPC-A a scan of the same pack reads
+        assert_eq!(foods_for(&shared, &off, "04252614", "2026-03-10", "2026-03-10", MealType::Snack).unwrap().code.as_deref(), Some("042100005264"));
         assert!(foods_for(&shared, &off, "egg", "nope", "2026-03-10", MealType::Snack).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }

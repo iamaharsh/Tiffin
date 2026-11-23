@@ -73,4 +73,6 @@
   .sheet :global(.check) { display: flex; align-items: center; gap: 9px; color: var(--ink); }
   .sheet :global(.label) { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
   .sheet :global(.fine) { margin: 0; font-size: 12.5px; color: var(--ink-3); }
+  /* a warning stays a warning inside a sheet: the plain-hint grey above out-ranks a component's own .warn, or ties with it and wins on stylesheet order */
+  .sheet :global(.fine.warn) { color: var(--warn); }
 </style>

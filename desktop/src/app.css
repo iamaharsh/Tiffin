@@ -54,6 +54,7 @@
 
   /* text on an accent or danger fill, and the hairline under it */
   --on-accent: #ffffff;
+  --on-heart: #ffffff; /* text on a danger fill; dark ink in dark mode, where white on the lighter heart is ~3:1 */
   --btn-edge: rgba(0, 0, 0, 0.15);
 
   /* section tiles (white icon on top) */
@@ -67,9 +68,13 @@
   --tile-diary: #0F9AB8;
   --tile-targets: #4F5FD8;
   --tile-body: #139585;
+  --tile-home: #8A5A3B;
+  --tile-reports: #52677A;
   /* page-title inks for Targets and Body: the tile pulled toward the text colour, so the mix follows the theme */
   --targets-ink: color-mix(in srgb, var(--tile-targets), var(--ink) 35%);
   --body-ink: color-mix(in srgb, var(--tile-body), var(--ink) 35%);
+  --home-ink: color-mix(in srgb, var(--tile-home), var(--ink) 35%);
+  --reports-ink: color-mix(in srgb, var(--tile-reports), var(--ink) 35%);
 
   /* macros */
   --protein: #2f7de1;
@@ -118,6 +123,7 @@
   --olive-text: #9cae5c;
   --pill: #4a3b2d;
   --heart: #ff5c74;
+  --on-heart: #2b2118;
   --star-off: #4a4541;
   --ok: #5cc98a;
   --warn: #e4a850;
@@ -184,7 +190,7 @@ button {
 .btn:active { transform: scale(0.97); }
 .btn.primary { background: var(--accent); color: var(--on-accent); box-shadow: inset 0 -1px 0 var(--btn-edge); }
 .btn.primary:hover { background: var(--accent-press); }
-.btn.danger { background: var(--heart); color: var(--on-accent); box-shadow: none; }
+.btn.danger { background: var(--heart); color: var(--on-heart); box-shadow: none; }
 .btn.ghost { min-width: 0; background: none; color: var(--accent-text); box-shadow: none; }
 .btn.ghost:hover { background: none; text-decoration: underline; }
 .btn:disabled { opacity: 0.5; transform: none; }

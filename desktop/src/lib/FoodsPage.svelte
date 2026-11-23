@@ -83,7 +83,7 @@
       {#snippet item(v)}{v === 'us' ? 'US' : 'Metric'}{/snippet}
     </Segmented>
   </header>
-  <FoodSearch bind:this={search} us={units === 'us'} {onerror} {actions} onadd={(name) => (editing = api.blankFood(name))} />
+  <FoodSearch bind:this={search} us={units === 'us'} {onerror} {actions} onadd={(name, barcode) => (editing = { ...api.blankFood(name), barcode: barcode ?? '' })} />
 </div>
 
 {#if editing}

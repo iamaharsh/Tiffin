@@ -159,6 +159,8 @@ pub struct PlannedMeal {
     pub slot: MealType,
     pub slot_label: &'static str,
     pub kcal: Option<f32>,
+    /// "520 kcal", when known.
+    pub kcal_text: Option<String>,
     pub loggable: bool,
     pub note: Option<&'static str>,
 }
@@ -176,7 +178,7 @@ pub fn planned(meals: &[Meal], day: i32, recipe: impl Fn(u64) -> Option<(String,
                 Some(Some((name, None))) => (name, None, true, Some("No nutrition estimate yet. It will be logged with values unknown.")),
                 Some(Some((name, Some(per)))) => (name, foods::display(&per).calories, true, None),
             };
-            PlannedMeal { meal_id: m.id, name, slot: m.kind, slot_label: slot_label(m.kind), kcal, loggable, note }
+            PlannedMeal { meal_id: m.id, name, slot: m.kind, slot_label: slot_label(m.kind), kcal_text: kcal.map(|k| format!("{} kcal", goals::kcal_text(k.round() as i32))), kcal, loggable, note }
         })
         .collect()
 }
@@ -243,7 +245,7 @@ pub fn planned_rows(j: &mut Journal, day: &str, slot: MealType, meals: &[Meal], 
     Ok(rows)
 }
 
-fn slot_label(slot: MealType) -> &'static str {
+pub(crate) fn slot_label(slot: MealType) -> &'static str {
     if slot == MealType::Snack {
         "Snacks"
     } else {
@@ -361,7 +363,7 @@ pub struct Totals {
     pub net_carbs: Option<f32>,
 }
 
-fn totals(entries: &[&DiaryEntry]) -> Totals {
+pub(crate) fn totals(entries: &[&DiaryEntry]) -> Totals {
     let (mut sum, mut net) = (Nutrients::ZERO, Some(0.0f32));
     for e in entries {
         let n = entry_nutrients(e);
@@ -1326,6 +1328,7 @@ mod tests {
     fn renamed_my_food_keeps_its_history() {
         let d = tdir("renamed");
         let mut j = Journal::open(d.clone());
+        let _turn = crate::nutrition::my_foods_test_lock();
         // odd names: save_my_food sets the estimator's global My Foods, which other tests share
         let mut lib = Default::default(); // inferred from save_my_food: the tracker never names the library type
         crate::nutrition::save_my_food(&mut lib, MyFood { name: "Zxq whey".into(), serving_g: 31.0, ..Default::default() });

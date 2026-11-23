@@ -68,40 +68,91 @@ fn retry_after(header: Option<&str>) -> u64 {
 }
 
 fn search_at(url: &str, text: &str, email: &str) -> OffAnswer {
-    let Some(agent_name) = user_agent(email) else { return OffAnswer::NeedsEmail };
-    let Ok(tls) = native_tls::TlsConnector::new() else { return OffAnswer::Slow };
-    // no redirects: the host is fixed and a search never needs one
-    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(Duration::from_secs(8)).redirects(0).build();
-    let sent = agent
-        .get(url)
-        .set("User-Agent", &agent_name)
-        .query("q", text)
-        .query("page_size", "20")
-        .query("langs", "en")
-        .query("fields", "code,product_name,brands,serving_size,serving_quantity,nutriments")
-        .call();
-    let resp = match sent {
-        Ok(r) => r,
-        Err(ureq::Error::Status(429 | 503, r)) => return OffAnswer::Limited(retry_after(r.header("Retry-After"))),
-        Err(ureq::Error::Status(..)) => return OffAnswer::Slow,
-        Err(ureq::Error::Transport(t)) => {
-            return if matches!(t.kind(), ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed) { OffAnswer::Offline } else { OffAnswer::Slow };
-        }
+    let v = match get_json(url, email, &[("q", text), ("page_size", "20"), ("langs", "en"), ("fields", FIELDS)]) {
+        Ok(v) => v,
+        Err(answer) => return answer,
     };
-    if resp.status() != 200 {
-        return OffAnswer::Slow;
+    found_or_empty(parse_hits(&v))
+}
+
+const FIELDS: &str = "code,product_name,brands,serving_size,serving_quantity,nutriments";
+pub const OFF_PRODUCT_URL: &str = "https://world.openfoodfacts.org/api/v2/product";
+
+/// What the lookup says about a barcode whose check digit doesn't fit (so nothing was sent).
+pub const BAD_BARCODE: &str = "That barcode number doesn't add up. Check the digits against the pack.";
+
+/// Look up one product by its barcode, naming the person's `email` in the User-Agent. Sends only the code: one request,
+/// 8 s timeout, at most 2 MB read. A code that fails its check digit is refused before anything is sent.
+/// (The v2 endpoint: v3 is documented as still changing, and both share the 100-reads-a-minute limit.)
+pub fn product(code: &str, email: &str) -> Result<OffAnswer, String> {
+    product_at(OFF_PRODUCT_URL, code, email)
+}
+
+fn product_at(base: &str, code: &str, email: &str) -> Result<OffAnswer, String> {
+    let code = code.trim();
+    if !gtin_ok(code) {
+        return Err(BAD_BARCODE.into());
     }
-    let mut body = Vec::new();
-    if resp.into_reader().take(2 * 1024 * 1024).read_to_end(&mut body).is_err() {
-        return OffAnswer::Slow;
+    let mut v = match get_json(&format!("{base}/{code}.json"), email, &[("fields", FIELDS)]) {
+        Ok(v) => v,
+        Err(answer) => return Ok(answer),
+    };
+    if v.get("status").and_then(Value::as_i64) == Some(0) || !v["product"].is_object() {
+        return Ok(OffAnswer::Empty);
     }
-    let Ok(v) = serde_json::from_slice::<Value>(&body) else { return OffAnswer::Slow };
-    let hits = parse_hits(&v);
+    let p = &mut v["product"];
+    p["code"] = Value::from(code);
+    // a product listed without a name is still the right product for this barcode
+    if p.get("product_name").and_then(Value::as_str).is_none_or(|n| n.trim().is_empty()) {
+        p["product_name"] = Value::from(format!("Barcode {code}"));
+    }
+    Ok(found_or_empty(parse_hits(&serde_json::json!({ "hits": [p.take()] }))))
+}
+
+fn found_or_empty(hits: Vec<OnlineFood>) -> OffAnswer {
     if hits.is_empty() {
         OffAnswer::Empty
     } else {
         OffAnswer::Found(hits)
     }
+}
+
+/// One GET to Open Food Facts with the contact User-Agent and nothing else, no redirects (the host is fixed), 8 s, 2 MB.
+/// Every way it can go wrong is an answer: not there (404), offline, slow, or told to wait.
+fn get_json(url: &str, email: &str, query: &[(&str, &str)]) -> Result<Value, OffAnswer> {
+    let agent_name = user_agent(email).ok_or(OffAnswer::NeedsEmail)?;
+    let tls = native_tls::TlsConnector::new().map_err(|_| OffAnswer::Slow)?;
+    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(Duration::from_secs(8)).redirects(0).build();
+    let mut req = agent.get(url).set("User-Agent", &agent_name);
+    for (k, v) in query {
+        req = req.query(k, v);
+    }
+    let resp = match req.call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(429 | 503, r)) => return Err(OffAnswer::Limited(retry_after(r.header("Retry-After")))),
+        Err(ureq::Error::Status(404, _)) => return Err(OffAnswer::Empty),
+        Err(ureq::Error::Status(..)) => return Err(OffAnswer::Slow),
+        Err(ureq::Error::Transport(t)) => {
+            return Err(if matches!(t.kind(), ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed) { OffAnswer::Offline } else { OffAnswer::Slow });
+        }
+    };
+    if resp.status() != 200 {
+        return Err(OffAnswer::Slow);
+    }
+    let mut body = Vec::new();
+    resp.into_reader().take(2 * 1024 * 1024).read_to_end(&mut body).map_err(|_| OffAnswer::Slow)?;
+    serde_json::from_slice::<Value>(&body).map_err(|_| OffAnswer::Slow)
+}
+
+/// GS1 check digit (EAN-8, UPC-A, EAN-13): weights 3, 1, 3… from the right, the check digit left out.
+pub fn gtin_ok(code: &str) -> bool {
+    if !matches!(code.len(), 8 | 12 | 13) || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let d: Vec<u32> = code.bytes().map(|b| (b - b'0') as u32).collect();
+    let (body, check) = d.split_at(d.len() - 1);
+    let sum: u32 = body.iter().rev().enumerate().map(|(i, &x)| if i % 2 == 0 { x * 3 } else { x }).sum();
+    (10 - sum % 10) % 10 == check[0]
 }
 
 /// A JSON number, or a number written as text; a missing, non-numeric, non-finite or negative value is `None` (unknown).
@@ -175,7 +226,7 @@ pub fn parse_hits(v: &Value) -> Vec<OnlineFood> {
 
 /// Calories far from 4P + 4C + 9F (more than 25% and more than 10 kcal off), a macro above 100 g in 100 g,
 /// more than 900 kcal in 100 g (pure fat is about 884), or sodium above 40,000 mg in 100 g (salt is about 39,000).
-fn is_suspect(n: &Nutrients) -> bool {
+pub(crate) fn is_suspect(n: &Nutrients) -> bool {
     let macros = [n.protein_g, n.carbs_g, n.fat_g, n.fiber_g, n.sugar_g];
     if macros.iter().flatten().any(|m| *m > 100.0) || n.calories.is_some_and(|k| k > 900.0) || n.sodium_mg.is_some_and(|m| m > 40000.0) {
         return true;
@@ -229,6 +280,40 @@ pub fn cache_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("cache").join("off-products.json")
 }
 
+/// UPC-E (8 digits with zeros squeezed out) → the 12-digit UPC-A it stands for.
+pub(crate) fn upc_e_to_a(e: &str) -> Option<String> {
+    if e.len() != 8 || !e.bytes().all(|b| b.is_ascii_digit()) || !matches!(&e[0..1], "0" | "1") {
+        return None;
+    }
+    let d = &e[1..7];
+    let mid = match d.as_bytes()[5] {
+        b'0'..=b'2' => format!("{}{}0000{}", &d[0..2], &d[5..6], &d[2..5]),
+        b'3' => format!("{}00000{}", &d[0..3], &d[3..5]),
+        b'4' => format!("{}00000{}", &d[0..4], &d[4..5]),
+        _ => format!("{}0000{}", &d[0..5], &d[5..6]),
+    };
+    Some(format!("{}{}{}", &e[0..1], mid, &e[7..8]))
+}
+
+/// What a search box query says as a barcode: `None` when it isn't one (not 8, 12 or 13 digits), else the code to look up
+/// (a typed UPC-E becomes its UPC-A) or [`BAD_BARCODE`] when the digits don't add up. Nothing is sent for a bad one.
+pub fn barcode_in(q: &str) -> Option<Result<String, &'static str>> {
+    let q = q.trim();
+    if !matches!(q.len(), 8 | 12 | 13) || !q.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // shortcut: 8 digits that are valid both as EAN-8 and as a UPC-E (about 1 in 10 UPC-Es) are taken as EAN-8; a scan knows its format, typing doesn't. Look up both if it matters.
+    if gtin_ok(q) {
+        return Some(Ok(q.to_string()));
+    }
+    Some(upc_e_to_a(q).filter(|a| gtin_ok(a)).ok_or(BAD_BARCODE))
+}
+
+/// One product however its code is written: a UPC-A and the same code as EAN-13 ("0" in front) match.
+pub(crate) fn same_code(a: &str, b: &str) -> bool {
+    !code_key(a).is_empty() && code_key(a) == code_key(b)
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct CacheFile {
@@ -270,6 +355,12 @@ impl OffCache {
         &self.items
     }
 
+    /// The kept product with this barcode, so a product scanned before is found offline. Leading zeros don't matter:
+    /// a UPC-A and the same code as EAN-13 ("0" in front) are one product.
+    pub fn get(&self, code: &str) -> Option<&OnlineFood> {
+        self.items.iter().find(|f| same_code(code, &f.code))
+    }
+
     /// Keep `food` (a product seen again replaces its entry and keeps its first `fetched` time), drop the least recently used past the cap, and save.
     pub fn remember(&mut self, mut food: OnlineFood, now: u64) -> Result<(), String> {
         food.last_used = now;
@@ -301,7 +392,7 @@ pub fn as_my_food(f: &OnlineFood) -> (MyFood, bool) {
     } else {
         ("100 g".to_string(), 100.0)
     };
-    let food = MyFood { name, serving, serving_g, per_serving: f.per100.scaled(serving_g / 100.0), source: format!("Open Food Facts, product {}", f.code), ..Default::default() };
+    let food = MyFood { name, serving, serving_g, per_serving: f.per100.scaled(serving_g / 100.0), source: format!("Open Food Facts, product {}", f.code), barcode: if gtin_ok(f.code.trim()) { f.code.trim().to_string() } else { String::new() }, ..Default::default() };
     (food, f.per100.calories.is_some() && !f.suspect)
 }
 
@@ -309,6 +400,163 @@ pub fn as_my_food(f: &OnlineFood) -> (MyFood, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// PRIV-02: an online search carries the typed text, the fixed search fields and the contact User-Agent, and nothing else.
+    #[test]
+    fn a_search_sends_only_the_text_and_the_contact() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/search", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut lines = vec![];
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            loop {
+                let mut l = String::new();
+                if reader.read_line(&mut l).unwrap() == 0 || l == "\r\n" {
+                    break;
+                }
+                lines.push(l.trim_end().to_string());
+            }
+            conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"hits\":[]}").unwrap();
+            lines
+        });
+        assert_eq!(search_at(&url, "oat milk", "me@example.com"), OffAnswer::Empty);
+        let lines = server.join().unwrap();
+        assert_eq!(lines[0], "GET /search?q=oat+milk&page_size=20&langs=en&fields=code%2Cproduct_name%2Cbrands%2Cserving_size%2Cserving_quantity%2Cnutriments HTTP/1.1");
+        let mut headers: Vec<String> = lines[1..].iter().map(|h| h.split(':').next().unwrap().to_ascii_lowercase()).collect();
+        headers.sort();
+        assert_eq!(headers, ["accept", "accept-encoding", "host", "user-agent"], "no cookie, referrer or other header: {lines:?}");
+        assert!(lines.contains(&format!("User-Agent: Tiffin/{} (me@example.com)", APP_VERSION)));
+    }
+
+    /// A one-request HTTP server on this machine: answers `reply` and hands back the request lines it received.
+    fn serve(reply: String) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/api/v2/product", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut lines = vec![];
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            loop {
+                let mut l = String::new();
+                if reader.read_line(&mut l).unwrap() == 0 || l == "\r\n" {
+                    break;
+                }
+                lines.push(l.trim_end().to_string());
+            }
+            conn.write_all(reply.as_bytes()).unwrap();
+            lines
+        });
+        (base, server)
+    }
+
+    fn http(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    /// PRIV-02: a barcode lookup carries the code, the fixed fields and the contact User-Agent, and nothing else.
+    #[test]
+    fn a_barcode_lookup_sends_only_the_code_and_the_contact() {
+        let body = json!({"status": 1, "product": {"product_name": "Extra Firm Tofu", "brands": "Sunrise", "serving_size": "85 g", "serving_quantity": 85,
+            "nutriments": {"energy-kcal_100g": 141, "proteins_100g": 15.3, "fat_100g": 8.2, "carbohydrates_100g": 2.4, "sodium_100g": 0.012}}}).to_string();
+        let (base, server) = serve(http("200 OK", &body));
+        let answer = product_at(&base, " 196633823717 ", "me@example.com").unwrap();
+        let lines = server.join().unwrap();
+        assert_eq!(lines[0], "GET /api/v2/product/196633823717.json?fields=code%2Cproduct_name%2Cbrands%2Cserving_size%2Cserving_quantity%2Cnutriments HTTP/1.1");
+        let mut headers: Vec<String> = lines[1..].iter().map(|h| h.split(':').next().unwrap().to_ascii_lowercase()).collect();
+        headers.sort();
+        assert_eq!(headers, ["accept", "accept-encoding", "host", "user-agent"], "no cookie, referrer or other header: {lines:?}");
+        assert!(lines.contains(&format!("User-Agent: Tiffin/{} (me@example.com)", APP_VERSION)));
+        let OffAnswer::Found(hits) = answer else { panic!("{answer:?}") };
+        let f = &hits[0];
+        assert_eq!((f.code.as_str(), f.name.as_str(), f.brands.as_str(), f.serving_g), ("196633823717", "Extra Firm Tofu", "Sunrise", 85.0));
+        assert_eq!((f.per100.calories, f.per100.protein_g, f.per100.sodium_mg, f.per100.fiber_g), (Some(141.0), Some(15.3), Some(12.0), None));
+        assert!(!f.suspect);
+    }
+
+    #[test]
+    fn barcode_answers_for_every_outcome() {
+        // impossible values come back flagged, and a nameless product still comes back for its barcode
+        let body = json!({"status": 1, "product": {"nutriments": {"energy-kcal_100g": 50, "proteins_100g": 130}}}).to_string();
+        let (base, server) = serve(http("200 OK", &body));
+        let OffAnswer::Found(hits) = product_at(&base, "4006381333931", "me@example.com").unwrap() else { panic!() };
+        server.join().unwrap();
+        assert!(hits[0].suspect);
+        assert_eq!(hits[0].name, "Barcode 4006381333931");
+        // not in the database: "status 0" or a 404
+        let (base, server) = serve(http("200 OK", r#"{"status":0,"status_verbose":"product not found"}"#));
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Empty));
+        server.join().unwrap();
+        let (base, server) = serve(http("404 Not Found", "{}"));
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Empty));
+        server.join().unwrap();
+        // told to wait
+        let (base, server) = serve("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n".into());
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Limited(30)));
+        server.join().unwrap();
+        let (base, server) = serve("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n".into());
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Limited(5)));
+        server.join().unwrap();
+        // an odd answer: a product that isn't an object is "not there", a body that isn't JSON is "slow"
+        let (base, server) = serve(http("200 OK", r#"{"status":1,"product":[1,2]}"#));
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Empty));
+        server.join().unwrap();
+        let (base, server) = serve(http("200 OK", "<html>busy</html>"));
+        assert_eq!(product_at(&base, "4006381333931", "me@example.com"), Ok(OffAnswer::Slow));
+        server.join().unwrap();
+        // the search shares the same handling: a 404 there is "no results"
+        let (base, server) = serve(http("404 Not Found", "{}"));
+        assert_eq!(search_at(&base, "oat milk", "me@example.com"), OffAnswer::Empty);
+        server.join().unwrap();
+        // nothing listens on port 9: a wrong check digit or a missing email is refused before any request is tried
+        assert_eq!(product_at("http://127.0.0.1:9/p", "4006381333930", "me@example.com"), Err(BAD_BARCODE.to_string()));
+        assert_eq!(product_at("http://127.0.0.1:9/p", "../../search?q=x", "me@example.com"), Err(BAD_BARCODE.to_string()));
+        assert_eq!(product_at("http://127.0.0.1:9/p", "4006381333931", ""), Ok(OffAnswer::NeedsEmail));
+        assert_eq!(product_at("http://127.0.0.1:9/p", "4006381333931", "me@example.com"), Ok(OffAnswer::Offline));
+    }
+
+    #[test]
+    fn check_digits() {
+        for good in ["815074022915", "196633823717", "4006381333931", "96385074", "042100005264"] {
+            assert!(gtin_ok(good), "{good}");
+        }
+        for bad in ["815074022914", "4006381333930", "12345", "", "81507402291x", "12345678901231"] {
+            assert!(!gtin_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_query_that_is_a_barcode() {
+        assert_eq!(barcode_in(" 196633823717 "), Some(Ok("196633823717".into())));
+        assert_eq!(barcode_in("96385074"), Some(Ok("96385074".into())));
+        // a typed UPC-E (not a valid EAN-8) is looked up as its UPC-A
+        assert_eq!(barcode_in("04252614"), Some(Ok("042100005264".into())));
+        assert_eq!(barcode_in("196633823718"), Some(Err(BAD_BARCODE)));
+        // valid both as EAN-8 and as UPC-E (012345000065): EAN-8 wins
+        assert!(gtin_ok("01234565") && upc_e_to_a("01234565").is_some_and(|a| gtin_ok(&a)));
+        assert_eq!(barcode_in("01234565"), Some(Ok("01234565".into())));
+        // a date that happens to add up is looked up as a barcode, never text-searched
+        assert_eq!(barcode_in("20261122"), Some(Ok("20261122".into())));
+        assert_eq!(barcode_in("20261123"), Some(Err(BAD_BARCODE)));
+        for text in ["greek yogurt", "1966338237", "19663382371x", "", "1 cup"] {
+            assert_eq!(barcode_in(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_product_scanned_before_is_found_offline() {
+        let path = tmp("get");
+        let mut cache = OffCache::open(path.clone());
+        cache.remember(product("0196633823717", "Tofu"), 10).unwrap();
+        let reopened = OffCache::open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(reopened.get("196633823717").map(|f| f.name.as_str()), Some("Tofu"));
+        assert_eq!(reopened.get("00196633823717").map(|f| f.name.as_str()), Some("Tofu"));
+        assert!(reopened.get("4006381333931").is_none());
+        assert!(reopened.get("000").is_none());
+    }
 
     #[test]
     fn user_agent_names_tiffin_and_the_contact() {
@@ -469,6 +717,9 @@ mod tests {
         let mut no_kcal = product("1", "Mystery");
         no_kcal.per100.calories = None;
         assert!(!as_my_food(&no_kcal).1);
+        // the product's barcode goes with it, so scanning it again finds the saved food; a code that isn't one is left out
+        assert_eq!(as_my_food(&product("196633823717", "Tofu")).0.barcode, "196633823717");
+        assert_eq!(as_my_food(&product("0123", "Greek Yogurt")).0.barcode, "");
         let mut odd = product("2", "Odd");
         odd.suspect = true;
         assert!(!as_my_food(&odd).1);

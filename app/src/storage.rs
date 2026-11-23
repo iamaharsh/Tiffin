@@ -70,7 +70,12 @@ pub fn pick_folder(docs: &Path, old: &str, new: &str) -> PathBuf {
     }
 }
 
-pub fn backups_dir() -> PathBuf {
+/// Where backups go for the library in `data`. A test copy (`--data-dir`) keeps its own inside its data folder, so it
+/// never writes, restores from or strips the diary out of the owner's backups in Documents.
+pub fn backups_dir(data: &Path) -> PathBuf {
+    if data != data_dir() {
+        return data.join("Backups");
+    }
     pick_folder(&documents_dir(), MOVED_FOLDERS[0].1, MOVED_FOLDERS[0].2)
 }
 
@@ -831,30 +836,59 @@ pub fn parse_backup(t: &str) -> Result<BackupFile, String> {
     Ok(b)
 }
 
-/// Every backup in the backups folder and the extra folders: path, created, recipe count, and whether it has a diary.
-pub fn list_backups(extra: &[PathBuf]) -> Vec<(PathBuf, u64, usize, bool)> {
-    let mut out = vec![];
+/// The backups folder under both names (backups made before the rename still count while the old folder exists), then the extra folders.
+pub fn backup_dirs(data: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     let docs = documents_dir();
-    // both names, so backups made before the rename still list while the old folder exists
-    let mut dirs = vec![docs.join(MOVED_FOLDERS[0].2), docs.join(MOVED_FOLDERS[0].1)];
+    let mut dirs = if data != data_dir() { vec![backups_dir(data)] } else { vec![docs.join(MOVED_FOLDERS[0].2), docs.join(MOVED_FOLDERS[0].1)] };
     for d in extra {
         if !dirs.contains(d) {
             dirs.push(d.clone());
         }
     }
-    for d in dirs {
-        let Ok(rd) = fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().map(|x| x == BACKUP_EXT).unwrap_or(false) {
-                if let Ok(b) = read_backup(&p) {
-                    out.push((p, b.created, b.library.recipes.len(), b.journal.is_some()));
-                }
-            }
+    dirs
+}
+
+/// The backup files (by extension) in `dirs`, unread.
+fn backup_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter().filter_map(|d| fs::read_dir(d).ok()).flat_map(|rd| rd.flatten().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == BACKUP_EXT)).collect()
+}
+
+/// Every backup in the backups folder and the extra folders: path, created, recipe count, and whether it has a diary.
+pub fn list_backups(data: &Path, extra: &[PathBuf]) -> Vec<(PathBuf, u64, usize, bool)> {
+    let mut out = vec![];
+    for p in backup_files(&backup_dirs(data, extra)) {
+        if let Ok(b) = read_backup(&p) {
+            out.push((p, b.created, b.library.recipes.len(), b.journal.is_some()));
         }
     }
     out.sort_by(|a, b| b.1.cmp(&a.1));
     out
+}
+
+/// Take the diary section out of every backup in `dirs` that has one. Only the `journal` key goes: the rest is
+/// kept as JSON values (never through `BackupFile`, so keys a newer build wrote survive), and each file is
+/// replaced atomically. A file that isn't a Tiffin backup is left alone. Returns how many changed and the
+/// files that couldn't be read or changed (one that doesn't parse may still hold a diary, so it is named too).
+pub fn strip_diary(dirs: &[PathBuf]) -> (usize, Vec<PathBuf>) {
+    let (mut changed, mut failed) = (0, vec![]);
+    for p in backup_files(dirs) {
+        let Ok(text) = fs::read_to_string(&p) else {
+            failed.push(p);
+            continue;
+        };
+        let Ok(serde_json::Value::Object(mut b)) = serde_json::from_str::<serde_json::Value>(&text) else {
+            failed.push(p);
+            continue;
+        };
+        if b.get("kind").and_then(|k| k.as_str()) != Some("recipe-box-backup") || b.remove("journal").is_none() {
+            continue;
+        }
+        match serde_json::to_string(&b).map_err(|e| e.to_string()).and_then(|t| write_atomic(&p, t.as_bytes(), false)) {
+            Ok(()) => changed += 1,
+            Err(_) => failed.push(p),
+        }
+    }
+    (changed, failed)
 }
 
 // ---------------- sync (through a shared folder such as OneDrive or Dropbox) ----------------
@@ -1036,7 +1070,7 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(read_backup(&a).unwrap().library.recipes.len(), 1);
         assert_eq!(read_backup(&b).unwrap().library.recipes.len(), 2);
-        assert!(!list_backups(&[dir.clone()]).is_empty());
+        assert!(!list_backups(&data_dir(), &[dir.clone()]).is_empty());
         assert!(parse_backup("{}").is_err() && parse_backup(&fs::read_to_string(&a).unwrap()).unwrap().journal.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1118,8 +1152,22 @@ mod tests {
         assert!(p.file_name().unwrap().to_string_lossy().starts_with("Tiffin backup "));
         let old = d.join("Recipe Box backup 2026-01-01-10-00.recipebox");
         fs::rename(&p, &old).unwrap();
-        assert!(list_backups(&[d.clone()]).iter().any(|b| b.0 == old));
+        assert!(list_backups(&data_dir(), &[d.clone()]).iter().any(|b| b.0 == old));
         assert_eq!(read_backup(&old).unwrap().library.recipes.len(), 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_test_copy_keeps_its_backups_out_of_documents() {
+        let d = tdir("ownbk");
+        let docs = documents_dir();
+        assert_eq!(backups_dir(&d), d.join("Backups"));
+        let sync = d.join("sync");
+        let dirs = backup_dirs(&d, &[sync.clone()]);
+        assert_eq!(dirs, vec![d.join("Backups"), sync]);
+        assert!(dirs.iter().all(|x| !x.starts_with(&docs)));
+        // the real data folder still uses Documents
+        assert!(backups_dir(&data_dir()).starts_with(&docs));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1511,6 +1559,23 @@ mod tests {
         assert!(st.snapshots().iter().any(|s| s.reason.starts_with("before update from")));
         let on_disk: Library = serde_json::from_str(&fs::read_to_string(main_of(&d)).unwrap()).unwrap();
         assert_eq!((on_disk.format, on_disk.app_version.as_str()), (LIBRARY_FORMAT, APP_VERSION));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_format_2_library_upgrades_to_3_with_its_foods_unchanged() {
+        let d = tdir("f2to3");
+        // this build's own version: only the format can trigger the upgrade
+        let f2 = format!(r#"{{"format": {}, "app_version": "{}", "my_foods": [{{"id": 4, "name": "Soy milk", "serving": "1 cup", "serving_g": 250, "serving_ml": 250, "per_serving": {{"calories": 100, "protein_g": 7}}, "source": "Photo of the label"}}]}}"#, LIBRARY_FORMAT - 1, APP_VERSION);
+        fs::write(main_of(&d), f2).unwrap();
+        let mut st = Store::new(d.clone(), false);
+        let LoadOutcome::Loaded { lib } = st.load() else { panic!("expected Loaded") };
+        assert_eq!(lib.format, LIBRARY_FORMAT);
+        assert!(st.snapshots().iter().any(|s| s.reason.starts_with("before update from")), "the older-format file is kept first");
+        let on_disk: Library = serde_json::from_str(&fs::read_to_string(main_of(&d)).unwrap()).unwrap();
+        let f = &on_disk.my_foods[0];
+        assert_eq!((on_disk.format, f.id, f.name.as_str(), f.serving_g, f.serving_ml, f.barcode.as_str()), (LIBRARY_FORMAT, 4, "Soy milk", 250.0, 250.0, ""));
+        assert_eq!((f.per_serving.calories, f.per_serving.protein_g, f.per_serving.fat_g), (Some(100.0), Some(7.0), None));
         let _ = fs::remove_dir_all(&d);
     }
 

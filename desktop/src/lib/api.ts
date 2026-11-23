@@ -6,6 +6,9 @@ export type Overview = {
   pinned: { id: number; name: string }[]; lists: string[]; today: number;
   /** why the library can't be changed (damaged file); null when it can */
   locked: string | null;
+  /** the sidebar's tabs in the person's order, and the tab Tiffin opens on */
+  sidebar: Section[];
+  launch: Section;
 };
 /**
  * Something to tell about the library file. `kept` is the safety copy's path; it is empty when
@@ -42,11 +45,15 @@ export type Draft = {
   difficulty: string; source: string; source_url: string; video_url: string; categories: string[];
   description: string; ingredients: string; directions: string; notes: string; photo: string; photo_seed: number;
 };
-export type Section = 'recipes' | 'browser' | 'groceries' | 'pantry' | 'foods' | 'diary' | 'targets' | 'body' | 'meals' | 'menus' | 'settings';
+export type Section = 'home' | 'reports' | 'recipes' | 'browser' | 'groceries' | 'pantry' | 'foods' | 'diary' | 'targets' | 'body' | 'meals' | 'menus' | 'settings';
 export type Units = 'original' | 'metric' | 'us';
 
 // the local day, so the Meals planner's Today is the diary's today
 export const overview = () => invoke<Overview>('overview', { today: localDay() });
+/** Every sidebar tab's name, in the crate's default order (app/src/sidebar.rs TABS; tools/sidebar-check.mjs keeps the two in step). */
+export const tabNames: Partial<Record<Section, string>> = { home: 'Home', reports: 'Reports', diary: 'Diary', targets: 'Targets', body: 'Body', recipes: 'Recipes', groceries: 'Groceries', pantry: 'Pantry', foods: 'Foods', meals: 'Meal Plan', menus: 'Menus', browser: 'Browser' };
+export const setSidebarOrder = (order: Section[]) => invoke<void>('set_sidebar_order', { order });
+export const setLaunchPage = (page: Section) => invoke<void>('set_launch_page', { page });
 export const list = (view: string, search: string, sort: number) => invoke<Card[]>('list', { view, search, sort });
 export const recipe = (id: number, scale: number, units: Units) => invoke<Detail>('recipe', { id, scale, units });
 export const setFavorite = (id: number, on: boolean) => invoke<void>('set_favorite', { id, on });
@@ -135,16 +142,21 @@ export type SettingsInfo = {
   off_email: string;
   services: string[]; service_url: string;
   inbox_dir: string; inbox_ready: boolean; instructions: string; recipes: number; favorites: number;
+  /** the data sources credited on the About screen */
+  sources: DataSource[];
 };
+export type DataSource = { name: string; used_for: string; licence: string; credit: string; link: string };
 export type SettingsChange = Partial<{ sync_folder: string; auto_sync: boolean; device_name: string; tracker_service: string; tracker_folder: string; tracker_auto_send: boolean }>;
 export type SavedVersion = { path: string; when: string; recipes: number; reason: string; favorites: number; has_diary: boolean };
-export type MyFood = { id: number; name: string; aliases: string; serving: string; serving_g: number; serving_ml: number; per_serving: Nutrients; piece: string; piece_g: number; source: string; modified: number };
+export type MyFood = { id: number; name: string; aliases: string; serving: string; serving_g: number; serving_ml: number; per_serving: Nutrients; piece: string; piece_g: number; source: string; barcode: string; modified: number };
 export const settingsInfo = () => invoke<SettingsInfo>('settings_info');
 export const setSettings = (change: SettingsChange) => invoke<void>('set_settings', { change });
 export const syncNow = () => invoke<string>('sync_now');
 /** Returns null when sync isn't set up or the library can't be changed. */
 export const autoSync = () => invoke<string | null>('auto_sync');
 export const backupNow = () => invoke<string>('backup_now');
+/** Deletes the journal folder and the diary in every backup; returns the sentence to show. */
+export const deleteHealthData = () => invoke<string>('delete_health_data');
 export const backups = () => invoke<SavedVersion[]>('backups');
 /** The same command, asked about one chosen file (its text): one row, with has_diary decided by the crate. */
 export const pickedBackup = (text: string) => invoke<SavedVersion[]>('backups', { picked: text });
@@ -158,12 +170,12 @@ export const sendAllToTracker = () => invoke<string>('send_all_to_tracker');
 export const setupInbox = () => invoke<string>('setup_inbox');
 export const openFolder = (which: 'inbox' | 'backups' | 'tracker') => invoke<void>('open_folder', { which });
 /** A new, empty food: numbers are 0 only because the type needs a number; the form shows them as blank boxes. */
-export const blankFood = (name = ''): MyFood => ({ id: 0, name, aliases: '', serving: '', serving_g: 0, serving_ml: 0, per_serving: {}, piece: '', piece_g: 0, source: '', modified: 0 });
+export const blankFood = (name = ''): MyFood => ({ id: 0, name, aliases: '', serving: '', serving_g: 0, serving_ml: 0, per_serving: {}, piece: '', piece_g: 0, source: '', barcode: '', modified: 0 });
 export const myFoods = () => invoke<MyFood[]>('my_foods');
 export const saveMyFood = (food: MyFood) => invoke<void>('save_my_food', { food });
 export const deleteMyFood = (id: number) => invoke<void>('delete_my_food', { id });
 /** What a product link, barcode or label photo filled in. */
-export type LabelGuess = { food: MyFood; source: string; missing: string[] };
+export type LabelGuess = { food: MyFood; source: string; missing: string[]; check: string[] };
 export const labelLookup = (input: string) => invoke<LabelGuess>('label_lookup', { input });
 /** The error a barcode lookup rejects with when no contact email is saved (mirrors `foods::off::NEEDS_EMAIL`). */
 export const NEEDS_EMAIL = 'needs_email';
@@ -181,14 +193,16 @@ export const mergeDuplicates = () => invoke<string>('merge_duplicates');
 export type Nutrients = Partial<Record<'calories' | 'protein_g' | 'fat_g' | 'carbs_g' | 'fiber_g' | 'sugar_g' | 'sodium_mg', number | null>>;
 export type FoodTag = 'My Food' | 'USDA' | 'Canada' | 'Open Food Facts' | 'Recipe' | 'Quick Add';
 export type FoodRow = { key: string; name: string; brand: string; tag: FoodTag; kcal: number | null; protein: number | null; carbs: number | null; fat: number | null; basis: string };
-export type OnlineStatus = 'ok' | 'empty' | 'offline' | 'slow' | 'limited' | 'wait' | 'needs_email';
+/** `bad_barcode`: the digits don't add up, nothing was sent. `no_product`: Open Food Facts doesn't list that barcode. */
+export type OnlineStatus = 'ok' | 'empty' | 'offline' | 'slow' | 'limited' | 'wait' | 'needs_email' | 'bad_barcode' | 'no_product';
 export type OnlineResult = { status: OnlineStatus; retry_in: number; added: number; rows: FoodRow[] };
 export type Unit = { id: string; label: string; grams: number };
 export type FoodDetail = { key: string; name: string; brand: string; tag: FoodTag; online: boolean; suspect: boolean; units: Unit[]; unit: string; amount: number; warning: string | null; note: string | null };
 export type Amount = { amount: number | null; grams: number | null; nutrients: Nutrients };
 export type FoodPreview = { per100: Nutrients | null; heavy: boolean; dense: boolean; problem: { field: string; message: string } | null };
 /** `online_ready` is the crate's rule for when Search Online may be pressed. */
-export type FoodResults = { rows: FoodRow[]; online_ready: boolean };
+/** `barcode`: the query is a barcode's digits; `code`: the barcode to look up or keep (a UPC-E as its UPC-A), null when they don't add up. */
+export type FoodResults = { rows: FoodRow[]; online_ready: boolean; barcode: boolean; code: string | null };
 /** Local search on every keystroke; never reaches the network. */
 export const searchFoods = (q: string) => invoke<FoodResults>('search_foods', { q });
 export const foodDetail = (key: string, us: boolean) => invoke<FoodDetail>('food_detail', { key, us });
@@ -200,6 +214,8 @@ export const offOpen = (code: string) => invoke<void>('off_open', { code });
 export const onlineFoodDraft = (code: string) => invoke<{ food: MyFood; ready: boolean }>('online_food_draft', { code });
 /** Online search: only when the person presses Search Online, never while typing. */
 export const offSearch = (q: string) => invoke<OnlineResult>('off_search', { q });
+/** The code read from a photo of a barcode, or null when none could be read. Offline. */
+export const barcodePhoto = async (file: File) => invoke<string | null>('barcode_photo', new Uint8Array(await file.arrayBuffer()));
 
 // ---- diary ----
 /** Sums for a meal or a day; null is "not reported for some food", never a partial sum. */
@@ -234,7 +250,7 @@ export const deleteEntry = (day: string, today: string, uid: string) => invoke<C
 export const editEntry = (day: string, today: string, uid: string, amount: number, unit: string, slot: MealType) => invoke<Changed>('edit_entry', { day, today, uid, amount, unit, slot });
 /** `view` is the target day's; `count` is how many entries were added. */
 export type Copied = { view: DayView; count: number };
-export type PlannedMeal = { meal_id: number; name: string; slot: MealType; slot_label: string; kcal: number | null; loggable: boolean; note: string | null };
+export type PlannedMeal = { meal_id: number; name: string; slot: MealType; slot_label: string; kcal: number | null; kcal_text: string | null; loggable: boolean; note: string | null };
 export type PlannedPick = { meal_id: number; servings: number };
 export const copyEntries = (from: string, day: string, today: string, slot: MealType | null) => invoke<Copied>('copy_entries', { from, day, today, slot });
 export const setDayComplete = (day: string, today: string, complete: boolean) => invoke<DayView>('set_day_complete', { day, today, complete });
@@ -247,7 +263,7 @@ export const diaryDay = (day: string, today: string) => invoke<DayView>('diary_d
 /** A crate message ready to sit inside a sentence: its final period dropped so the line never ends a clause with "..". */
 export const reason = (e: unknown) => String(e).replace(/\.+$/, '');
 export const logFood = (day: string, today: string, slot: MealType, key: string, amount: number, unit: string) => invoke<Logged>('log_food', { day, today, slot, key, amount, unit });
-export type DiaryFoods = { planned: FoodRow[]; recent: FoodRow[]; frequent: FoodRow[]; rows: FoodRow[]; online_ready: boolean };
+export type DiaryFoods = { planned: FoodRow[]; recent: FoodRow[]; frequent: FoodRow[]; rows: FoodRow[]; online_ready: boolean; barcode: boolean; code: string | null };
 /** The Add Food dialog's search: planned (the day's meal plan, `slot` first), recent and frequent foods when `q` is empty, else one ranked list (local only). */
 export const diaryFoods = (q: string, today: string, day: string, slot: MealType) => invoke<DiaryFoods>('diary_foods', { q, today, day, slot });
 export const quickAdd = (day: string, today: string, slot: MealType, label: string, calories: number | null, protein: number | null, carbs: number | null, fat: number | null) => invoke<Logged>('quick_add', { day, today, slot, label, calories, protein, carbs, fat });
@@ -355,6 +371,39 @@ export type DayValue = { measure: string; value: number | null; unit: UnitIn };
 /** `confirm` is the question to ask when a weight looks wrong (nothing saved; the same call with `confirmed` saves); `text` is what was saved. */
 export type BodyLogged = { confirm: string | null; text: string; drift: Drift | null; view: BodyView | null };
 export const bodyView = (range: BodyRange, today: string) => invoke<BodyView>('body_view', { range, today });
+
+// Home dashboard: hand-kept mirror of app/src/tracker/home.rs and trends.rs. The page prints these as the crate sent them.
+/** One day's bar: kcal from protein, carbs and fat; a null split is drawn as one neutral block of `kcal`. */
+export type EnergyBar = { day: number; protein_kcal: number | null; carbs_kcal: number | null; fat_kcal: number | null; kcal: number | null; target: number | null; logged: boolean };
+export type EnergyRow = { date_text: string; kcal_text: string; macros_text: string; target_text: string };
+export type EnergyChart = { bars: EnergyBar[]; x_min: number; x_max: number; y_max: number; label: string; empty_text: string | null; table: EnergyRow[] };
+export type RecentItem = { kind: 'food' | 'exercise' | 'weight'; title: string; detail: string; when_text: string };
+/** The share of judged days that met the macro goals over one range ending yesterday. */
+export type HitRate = { id: string; label: string; hits: number; judged: number; pct: number | null; text: string };
+/** A food or recipe at the amount that fits what's left today (mirror of app/src/tracker/fit.rs). */
+export type Fit = { key: string; name: string; tag: string; amount_text: string; macros_text: string };
+export type Fits = { foods: Fit[]; recipes: Fit[]; note: string | null };
+export type HomeView = {
+  date_text: string; budget: Budget | null; budget_state: BudgetState; budget_note: string | null; totals: Totals;
+  planned: PlannedMeal[]; fits: Fits; recent: RecentItem[]; hit_rates: HitRate[]; rates_note: string | null; streak: number; streak_text: string;
+  energy: EnergyChart; weight: Chart; weight_change_text: string | null;
+};
+export const homeView = (range: BodyRange, today: string) => invoke<HomeView>('home_view', { range, today });
+
+// Reports: hand-kept mirror of app/src/tracker/reports.rs. Averages over finished days with food logged.
+export type MacroTone = 'protein' | 'carbs' | 'fat';
+export type Slice = { name: string; tone: MacroTone; kcal: number; pct: number; text: string };
+export type MacroLine = { name: string; tone: MacroTone; eaten: number | null; goal: number | null; over: boolean; text: string; note: string | null };
+export type ReportRow = { label: string; value_text: string; total: boolean };
+export type NutrientLine = { name: string; value_text: string; note: string | null };
+export type Report = {
+  range_text: string; days_logged: number; days_text: string; empty_text: string | null;
+  consumed_text: string; consumed_figure: string | null; consumed_unit: string; consumed_note: string | null;
+  split: Slice[]; split_label: string; split_note: string | null;
+  burned: ReportRow[]; burned_note: string | null;
+  remaining_text: string; remaining_known: boolean; remaining_over: boolean; remaining_note: string | null; macros: MacroLine[]; nutrients: NutrientLine[];
+};
+export const reportView = (range: BodyRange, today: string) => invoke<Report>('report_view', { range, today });
 export const logMeasure = (day: string, today: string, measure: string, value: number, unit: UnitIn, confirmed: boolean, range: BodyRange | null) =>
   invoke<BodyLogged>('log_measure', { day, today, measure, value, unit, confirmed, range });
 export const undoBody = (range: BodyRange, today: string) => invoke<BodyView>('undo_body', { range, today });

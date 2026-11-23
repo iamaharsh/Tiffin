@@ -209,6 +209,13 @@ pub fn search(q: &str, mine: &[MyFood], online: &[OnlineFood]) -> Vec<FoodRow> {
 
 /// [`search`] with the user's recipes in the list too, and the row keys already `logged` winning ties.
 pub fn search_with(q: &str, mine: &[MyFood], online: &[OnlineFood], recipes: &[RecipeFood], logged: &[String]) -> Vec<FoodRow> {
+    // a scanned or typed barcode names one product: your foods saved with it, then a kept product, are the whole answer, offline too
+    if let Some(Ok(code)) = off::barcode_in(q) {
+        let found: Vec<FoodRow> = mine.iter().filter(|f| off::same_code(&code, &f.barcode)).map(my_row).chain(online.iter().find(|f| off::same_code(&code, &f.code)).map(online_row)).collect();
+        if !found.is_empty() {
+            return found;
+        }
+    }
     let qt = words(q);
     if qt.is_empty() {
         let mut m: Vec<&MyFood> = mine.iter().collect();
@@ -616,6 +623,27 @@ mod tests {
         let rows = search("greek yogurt", &[], &[o]);
         let r = rows.iter().find(|r| r.key == "off:0123").expect("cached product not found");
         assert_eq!((r.tag, r.brand.as_str(), r.kcal), ("Open Food Facts", "Fage", Some(59.0)));
+    }
+
+    #[test]
+    fn a_barcode_finds_its_kept_product_alone() {
+        let tofu = OnlineFood { code: "0196633823717".into(), name: "Extra Firm Tofu".into(), ..Default::default() };
+        let other = OnlineFood { code: "4006381333931".into(), name: "Pencils".into(), ..Default::default() };
+        let rows = search("196633823717", &[], &[other.clone(), tofu]);
+        assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["off:0196633823717"]);
+        // a barcode nobody kept yet, or one whose digits don't add up, is searched like any text
+        assert!(search("815074022915", &[], &[other.clone()]).iter().all(|r| !r.key.starts_with("off:")));
+        assert!(search("196633823718", &[], &[other]).iter().all(|r| !r.key.starts_with("off:")));
+    }
+
+    #[test]
+    fn a_barcode_finds_your_saved_food_first() {
+        let tofu = OnlineFood { code: "0196633823717".into(), name: "Extra Firm Tofu".into(), ..Default::default() };
+        let mine = [MyFood { barcode: "196633823717".into(), ..my(3, "Sunrise tofu") }, my(4, "Bread")];
+        let rows = search("196633823717", &mine, &[tofu]);
+        assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["my:3", "off:0196633823717"]);
+        // offline with nothing kept, the saved food alone; as EAN-13 it is the same product
+        assert_eq!(search("0196633823717", &mine, &[]).iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["my:3"]);
     }
 
     #[test]

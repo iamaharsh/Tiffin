@@ -1053,6 +1053,11 @@ fn my_food_slot(lib: &Library, f: &MyFood) -> Option<usize> {
 /// Renaming keeps the old name in the aliases, so diary history (`FoodRef::MyFood` holds the name) and recipes written with it still find the food.
 pub fn save_my_food(lib: &mut Library, mut f: MyFood) {
     f.modified = now_secs();
+    // only a code a scan can find again is kept (the form can't show a barcode problem, so a bad one is dropped, not refused)
+    f.barcode = f.barcode.trim().to_string();
+    if !crate::foods::off::gtin_ok(&f.barcode) {
+        f.barcode.clear();
+    }
     match my_food_slot(lib, &f) {
         Some(i) => {
             f.id = lib.my_foods[i].id;
@@ -1070,6 +1075,24 @@ pub fn save_my_food(lib: &mut Library, mut f: MyFood) {
     }
     lib.my_foods.sort_by_key(|x| x.name.to_lowercase());
     refresh_estimates(lib);
+}
+
+/// A food from a file (the inbox): saved like the form saves it, except that a file bringing no barcode keeps the one
+/// the food had (the form sends an empty barcode to remove it; a file just doesn't know).
+pub fn save_my_food_from_file(lib: &mut Library, mut f: MyFood) {
+    if f.barcode.trim().is_empty() {
+        if let Some(i) = my_food_slot(lib, &f) {
+            f.barcode = lib.my_foods[i].barcode.clone();
+        }
+    }
+    save_my_food(lib, f);
+}
+
+/// Tests that set the estimator's global My Foods (directly or through `save_my_food`) take turns, or one reads another's list.
+#[cfg(test)]
+pub(crate) fn my_foods_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -1246,6 +1269,7 @@ mod tests {
 
     #[test]
     fn my_foods_come_first() {
+        let _turn = my_foods_test_lock();
         let mine = MyFood {
             name: "Gold Standard Whey".into(),
             aliases: "test whey blend".into(),
@@ -1383,7 +1407,29 @@ salt and pepper to taste", false)).is_some(), "a small amount is not a skipped l
     }
 
     #[test]
+    fn a_saved_food_keeps_only_a_real_barcode() {
+        let _turn = my_foods_test_lock();
+        // odd names: save_my_food sets the estimator's global My Foods, which other tests share
+        let mut lib = Library::default();
+        save_my_food(&mut lib, MyFood { name: "Zqx tofu".into(), serving_g: 85.0, barcode: " 196633823717 ".into(), ..Default::default() });
+        assert_eq!(lib.my_foods[0].barcode, "196633823717");
+        // a replacement by name from a file with no barcode keeps it
+        save_my_food_from_file(&mut lib, MyFood { name: "zqx TOFU".into(), serving_g: 90.0, ..Default::default() });
+        assert_eq!((lib.my_foods.len(), lib.my_foods[0].serving_g, lib.my_foods[0].barcode.as_str()), (1, 90.0, "196633823717"));
+        // the form saving it with an empty barcode removes it
+        let id = lib.my_foods[0].id;
+        save_my_food(&mut lib, MyFood { id, name: "Zqx tofu".into(), serving_g: 90.0, ..Default::default() });
+        assert_eq!(lib.my_foods[0].barcode, "");
+        // digits that don't add up, or a UPC-E nobody expanded, are dropped rather than blocking the save
+        for bad in ["196633823718", "04252614", "tofu"] {
+            save_my_food(&mut lib, MyFood { name: "Zqx bar".into(), serving_g: 60.0, barcode: bad.into(), ..Default::default() });
+            assert_eq!(lib.my_foods.iter().find(|f| f.name == "Zqx bar").unwrap().barcode, "", "{bad}");
+        }
+    }
+
+    #[test]
     fn renaming_a_my_food_keeps_the_old_name_as_an_alias() {
+        let _turn = my_foods_test_lock();
         // odd names: save_my_food sets the estimator's global My Foods, which other tests share
         let mut lib = Library::default();
         save_my_food(&mut lib, MyFood { name: "Zxq whey".into(), serving_g: 31.0, ..Default::default() });

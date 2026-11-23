@@ -36,3 +36,6 @@ usage.json
 # GSD tool state, regenerated on every run
 /.planning/state.json
 __pycache__/
+
+# owner's real scan photos for trials; never committed
+.planning/research/scan-photos/

@@ -7,10 +7,12 @@ mod diary;
 mod exercise;
 mod goals;
 mod grocery;
+mod home;
 mod importing;
 mod meals;
 mod menus;
 mod pantry;
+mod reports;
 mod settings;
 mod update;
 
@@ -58,6 +60,9 @@ struct Overview {
     today: i32,
     /// why the library can't be changed right now (damaged file); shown as a permanent banner
     locked: Option<String>,
+    /// the sidebar's tabs in the person's order, and the tab Tiffin opens on (see `recipe_box::sidebar`)
+    sidebar: Vec<&'static str>,
+    launch: &'static str,
 }
 
 /// A one-time or standing message about the library file. `kept` is the verified copy's path, or ""
@@ -269,6 +274,8 @@ fn overview_of(s: &AppState, today: &str) -> Result<Overview, String> {
         lists: s.lib.grocery_lists.iter().map(|l| l.name.clone()).collect(),
         today: tracker::diary::day_number(today)?,
         locked: s.store.problem.as_ref().map(|p| p.banner()),
+        sidebar: recipe_box::sidebar::order(&s.lib.settings),
+        launch: recipe_box::sidebar::launch_page(&s.lib.settings),
     })
 }
 
@@ -849,6 +856,8 @@ pub fn run() {
             pantry::remove_out_of_stock,
             pantry::pantry_to_list,
             pantry::set_pantry_sort,
+            settings::set_sidebar_order,
+            settings::set_launch_page,
             meals::meals,
             meals::update_meal,
             meals::remove_meals,
@@ -865,6 +874,7 @@ pub fn run() {
             settings::auto_sync,
             settings::backup_now,
             settings::backups,
+            settings::delete_health_data,
             settings::snapshots,
             settings::take_snapshot,
             settings::restore_backup,
@@ -881,6 +891,7 @@ pub fn run() {
             settings::self_tests,
             settings::merge_duplicates,
             foods::off_search,
+            foods::barcode_photo,
             foods::set_off_email,
             foods::search_foods,
             foods::food_detail,
@@ -912,6 +923,8 @@ pub fn run() {
             goals::save_targets,
             goals::accept_target_update,
             body::body_view,
+            home::home_view,
+            reports::report_view,
             body::log_measure,
             body::undo_body,
             body::edit_measurements,

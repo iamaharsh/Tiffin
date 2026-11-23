@@ -7,6 +7,7 @@
 //!     then the same label-text reader.
 //! Whatever is found fills the form; the person checks it against the label before saving.
 
+use crate::foods::off::{gtin_ok, upc_e_to_a};
 use crate::model::{MyFood, Nutrients};
 
 #[derive(Clone, Debug, Default)]
@@ -16,7 +17,12 @@ pub struct LabelGuess {
     pub source: String,
     /// Label lines that weren't found (so the person knows what to type in).
     pub missing: Vec<&'static str>,
+    /// Things to check against the pack before saving: a value that looks misread, a weight that was worked out.
+    pub check: Vec<&'static str>,
 }
+
+pub const LOOKS_WRONG: &str = "Some numbers look wrong for this serving: the calories don't fit the protein, carbs and fat, or a value is too high. Check them against the label.";
+pub const GRAMS_FROM_ML: &str = "The label gives the serving in millilitres, so its weight is counted as 1 g per ml. Change it if the pack gives grams.";
 
 // ---------------------------------------------------------------------------------------------
 // Label text ("Serving size 1 scoop (31g) Calories 120 Total Fat 1.5g …")
@@ -137,6 +143,8 @@ pub fn parse_label_text(text: &str) -> Option<LabelGuess> {
         Some(v) if t.contains(" kj") && !t.contains("kcal") && !t.contains("calories") => Some(v / 4.184),
         other => other,
     };
+    // "energy 1590 kj" or "1590kj" (the unit right after the number), when no kcal figure was found: convert
+    let kcal = kcal.or_else(|| amount_of(&t, &["energy", "énergie"], &[], &["kj"]).map(|kj| kj / 4.184));
     take(kcal, &mut n.calories, "Calories", &mut missing);
     take(amount_of(&t, &["total fat", "fat", "lipides", "lipids"], &["saturated", "trans", "sat.", "sat", "poly", "mono", "polyunsaturated", "monounsaturated", "from"], g), &mut n.fat_g, "Fat", &mut missing);
     take(amount_of(&t, &["total carbohydrate", "carbohydrate", "carbohydrates", "total carbs", "carbs", "glucides"], &[], g), &mut n.carbs_g, "Carbohydrates", &mut missing);
@@ -154,10 +162,20 @@ pub fn parse_label_text(text: &str) -> Option<LabelGuess> {
         return None;
     }
     let (serving, serving_g, serving_ml) = serving_of(&t);
+    let mut check = vec![];
+    // the same rule as online products, on 100 g; without a serving weight there's nothing to scale by
+    // shortcut: servings under 20 g aren't checked (a 1 g sweetener packet's rounding scales to a false alarm); a rounding-aware rule would cover them.
+    if serving_g >= 20.0 && crate::foods::off::is_suspect(&n.scaled(100.0 / serving_g)) {
+        check.push(LOOKS_WRONG);
+    }
+    if serving_ml > 0.0 {
+        check.push(GRAMS_FROM_ML);
+    }
     Some(LabelGuess {
         food: MyFood { serving, serving_g, serving_ml, per_serving: n, ..Default::default() },
         source: String::new(),
         missing,
+        check,
     })
 }
 
@@ -291,9 +309,10 @@ fn off_product(p: &serde_json::Value, code: &str) -> Option<LabelGuess> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(LabelGuess {
-        food: MyFood { name, serving, serving_g: grams, per_serving, ..Default::default() },
+        food: MyFood { name, serving, serving_g: grams, per_serving, barcode: if gtin_ok(code) { code.to_string() } else { String::new() }, ..Default::default() },
         source: format!("Open Food Facts, barcode {}", code),
         missing,
+        check: vec![],
     })
 }
 
@@ -367,14 +386,32 @@ fn find_nutrition(v: &serde_json::Value) -> Option<LabelGuess> {
 
 /// Read the text in a photo with Windows' own text recognition (offline).
 pub fn read_photo(path: &std::path::Path) -> Result<String, String> {
-    // Windows reads pictures up to about 2600 px; phone photos are bigger, so shrink a copy.
+    ocr_image(&open_upright(path)?)
+}
+
+/// The picture turned the way the camera held it: phones save the pixels sideways plus an EXIF
+/// orientation tag, and text recognition reads sideways text as nonsense.
+fn open_upright(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    use image::ImageDecoder;
+    let bad = |e: image::ImageError| format!("Couldn't open the picture: {}", e);
     // by content, not file extension (pictures can arrive as extensionless temp files)
-    let img = image::ImageReader::open(path)
+    let mut decoder = image::ImageReader::open(path)
         .and_then(|r| r.with_guessed_format())
         .map_err(|e| format!("Couldn't open the picture: {}", e))?
-        .decode()
-        .map_err(|e| format!("Couldn't open the picture: {}", e))?;
-    let img = if img.width().max(img.height()) > 2400 { img.resize(2400, 2400, image::imageops::FilterType::Lanczos3) } else { img };
+        .into_decoder()
+        .map_err(bad)?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    // the memory cap decode() applied for us: a hostile picture can't claim gigabytes
+    image::Limits::default().reserve(decoder.total_bytes()).map_err(bad)?;
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(bad)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
+fn ocr_image(img: &image::DynamicImage) -> Result<String, String> {
+    // Windows reads pictures up to about 2600 px; phone photos are bigger, so shrink a copy.
+    let small;
+    let img = if img.width().max(img.height()) > 2400 { small = img.resize(2400, 2400, image::imageops::FilterType::Lanczos3); &small } else { img };
     let tmp = std::env::temp_dir().join(format!("recipebox-label-{}.png", crate::importer::unique_stamp()));
     let saved = img.save(&tmp).map_err(|e| e.to_string());
     let text = saved.and_then(|_| ocr_png(&tmp));
@@ -432,12 +469,84 @@ fn ocr_png(png: &std::path::Path) -> Result<String, String> {
 
 /// Photo of a nutrition label → numbers.
 pub fn from_photo(path: &std::path::Path) -> Result<LabelGuess, String> {
-    let text = read_photo(path)?;
-    let mut g = parse_label_text(&text).ok_or_else(|| {
+    let mut g = read_either_way_up(&open_upright(path)?, ocr_image)?.ok_or_else(|| {
         "Couldn't find the nutrition numbers in that photo. Try a sharper, straight-on photo of just the Nutrition Facts panel.".to_string()
     })?;
     g.source = format!("Photo of the label ({})", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
     Ok(g)
+}
+
+/// A box photographed upside down has no orientation tag to fix it, so try it turned round once.
+/// Only the first reading's failure is an error; a failed second try just means "not found".
+fn read_either_way_up(img: &image::DynamicImage, ocr: impl Fn(&image::DynamicImage) -> Result<String, String>) -> Result<Option<LabelGuess>, String> {
+    if let Some(g) = parse_label_text(&ocr(img)?) {
+        return Ok(Some(g));
+    }
+    Ok(ocr(&img.rotate180()).ok().and_then(|t| parse_label_text(&t)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Barcode photos
+
+/// Photo of a barcode → the product number, or None when no barcode can be read.
+/// First the barcode reader at three sizes: a code counts only when two sizes agree, because on label photos it
+/// otherwise "finds" codes that aren't there. Then the digits printed under the bars, read as text, which rescue a
+/// slightly blurry photo. Every code passes its check digit; UPC-E comes back as the UPC-A it stands for.
+pub fn barcode_from_photo(path: &std::path::Path) -> Result<Option<String>, String> {
+    let img = open_upright(path)?;
+    Ok(agreed(&img, decode_retail).or_else(|| ocr_image(&img).ok().and_then(|t| code_from_digits(&t))))
+}
+
+/// The first code read at two different sizes.
+// shortcut: a picture under 1500 px is enlarged, so its sizes aren't independent readings; phone photos are bigger, revisit for webcam stills.
+fn agreed(img: &image::DynamicImage, decode: impl Fn(&image::DynamicImage) -> Option<String>) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for size in [1500, 1000, 700] {
+        if let Some(code) = decode(&img.resize(size, size, image::imageops::FilterType::Triangle)) {
+            if seen.contains(&code) {
+                return Some(code);
+            }
+            seen.push(code);
+        }
+    }
+    None
+}
+
+/// Grocery barcodes only (EAN-13, UPC-A, EAN-8, UPC-E). Trying harder also tries the picture turned a quarter.
+fn decode_retail(img: &image::DynamicImage) -> Option<String> {
+    use rxing::BarcodeFormat as F;
+    let formats = [F::EAN_13, F::UPC_A, F::EAN_8, F::UPC_E].into_iter().collect();
+    let mut hints = rxing::DecodeHints::default().with(rxing::DecodeHintValue::TryHarder(true)).with(rxing::DecodeHintValue::PossibleFormats(formats));
+    let luma = img.to_luma8();
+    let (w, h) = luma.dimensions();
+    let found = rxing::helpers::detect_in_luma_with_hints(luma.into_raw(), w, h, None, &mut hints).ok()?;
+    let code = if *found.getBarcodeFormat() == F::UPC_E { upc_e_to_a(found.getText())? } else { found.getText().to_string() };
+    gtin_ok(&code).then_some(code)
+}
+
+/// The number printed under a barcode, from text recognition: "8 / 15074 02291 / 5" (UPC-A), "4 006381 333931"
+/// (EAN-13) or "1234 5670" (EAN-8): always in groups, never one long run, which is what dates and lot codes look like.
+/// Other numbers on the pack can sit in between, so the lone first or last digit is looked for up to two runs away.
+/// Only a single valid code counts; two is a guess.
+fn code_from_digits(text: &str) -> Option<String> {
+    let runs: Vec<&str> = text.split(|c: char| !c.is_ascii_digit()).filter(|r| !r.is_empty()).collect();
+    let lone = |ks: &mut dyn Iterator<Item = usize>| ks.take(2).map(|k| runs[k]).find(|r| r.len() == 1);
+    let mut found: Vec<String> = Vec::new();
+    for (i, run) in runs.iter().enumerate() {
+        let Some(next) = runs.get(i + 1).filter(|n| n.len() == run.len() && (4..=6).contains(&run.len())) else { continue };
+        let mid = format!("{run}{next}");
+        let (before, after) = (lone(&mut (0..i).rev()), lone(&mut (i + 2..runs.len())));
+        let code = match (run.len(), before, after) {
+            (4, _, _) => mid,
+            (5, Some(b), Some(a)) => format!("{b}{mid}{a}"),
+            (6, Some(b), _) => format!("{b}{mid}"),
+            _ => continue,
+        };
+        if gtin_ok(&code) && !found.contains(&code) {
+            found.push(code);
+        }
+    }
+    if found.len() == 1 { found.pop() } else { None }
 }
 
 #[cfg(test)]
@@ -508,6 +617,41 @@ Protein 25g";
     }
 
     #[test]
+    fn energy_given_only_in_kilojoules() {
+        for t in ["Per 100 g: Energy 1590kJ, Fat 6.5g, Carbohydrate 60g, Protein 13g", "Per 100 g: Energy 1590 kJ Fat 6.5 g Carbohydrate 60 g Protein 13 g"] {
+            let kcal = parse_label_text(t).unwrap().food.per_serving.calories.unwrap();
+            assert!((kcal - 380.0).abs() < 0.1, "{t}: {kcal}");
+        }
+        // the unit before the number still converts once, and kcal stays as printed
+        let kcal = parse_label_text("Per 100 g Energy kJ 1590 Fat 6.5 g Carbohydrate 60 g Protein 13 g").unwrap().food.per_serving.calories.unwrap();
+        assert!((kcal - 380.0).abs() < 0.1, "{kcal}");
+        assert_eq!(parse_label_text("Per 100 g Energy 1590 kJ / 380 kcal Fat 6.5 g Carbohydrate 60 g Protein 13 g").unwrap().food.per_serving.calories, Some(380.0));
+        // a Calories line wins over a kJ figure elsewhere
+        assert_eq!(parse_label_text("Per 100 g Calories 380 Fat 6.5 g Carbohydrate 60 g Protein 13 g Energy 1590 kJ").unwrap().food.per_serving.calories, Some(380.0));
+    }
+
+    #[test]
+    fn misread_or_worked_out_values_are_marked_for_checking() {
+        // as Windows text recognition read the owner's three labels: nothing to flag but the soy milk's millilitres
+        let soy = "Per 1 cup (250 mL)\r\npour 1 tasse (250 mL)\r\nCalories 100\r\nFat / Lipides 4 g\r\nSaturated / satur\u{e9}s 0.5 g\r\nCarbohydrate / Glucides 8 g\r\nFibre / Fibres 2 g\r\nSugars / Sucres 5 g\r\nProtein / Prot\u{e9}ines 7 g\r\nSodium 115 mg\r\n";
+        let bar = "Per 1 bar (60 g)\r\npour 1 barre (60 g)\r\nCalories 240\r\nFat / Lipides 9 g\r\nSaturated / satur\u{e9}s 5 g\r\nCarbohydrate / Glucides 22 g\r\nFibre / Fibres 2 g\r\nSugars / Sucres 1 g\r\nPolyols 9 g\r\nProtein / Prot\u{e9}ines 21 g\r\nSodium 135 mg\r\n";
+        let egg = "per 1/3 cup (100 g)\r\npour 1/3 tasse (100 g)\r\nCalories 45\r\nFat / Lipides 0 g\r\nCarbohydrate / Glucides 1 g\r\nFibre / Fibres 0 g\r\nSugars / Sucres 0 g\r\nProtein / Prot\u{e9}ines 10 g\r\nSodium 160 mg\r\n";
+        assert_eq!(parse_label_text(soy).unwrap().check, vec![GRAMS_FROM_ML]);
+        assert!(parse_label_text(bar).unwrap().check.is_empty());
+        assert!(parse_label_text(egg).unwrap().check.is_empty());
+        // "21 g" read as "219": far more protein than the bar weighs
+        let misread = bar.replace("21 g", "219");
+        assert_eq!(parse_label_text(&misread).unwrap().check, vec![LOOKS_WRONG]);
+        // no serving weight: nothing to scale by, so no guess either way
+        assert!(parse_label_text("Calories 240 Fat 9 g Carbohydrate 22 g Protein 219 g").unwrap().check.is_empty());
+        // a tiny serving's rounding isn't a misread: a 1 g sweetener packet at 0 calories, 1 g carbs
+        assert!(parse_label_text("Serving size 1 packet (1 g) Calories 0 Fat 0 g Carbohydrate 1 g Protein 0 g").unwrap().check.is_empty());
+        // a millilitre serving that also looks wrong gets both, the misread first
+        let both = soy.replace("Protein / Prot\u{e9}ines 7 g", "Protein / Prot\u{e9}ines 79 g");
+        assert_eq!(parse_label_text(&both).unwrap().check, vec![LOOKS_WRONG, GRAMS_FROM_ML]);
+    }
+
+    #[test]
     fn product_page_json_ld() {
         let html = r#"<html><head><title>Seitan Strips | Shop</title><script type="application/ld+json">{"@type":"Product","name":"Original Seitan Strips","nutrition":{"@type":"NutritionInformation","servingSize":"3 oz (85 g)","calories":"130 calories","fatContent":"2 g","carbohydrateContent":"4 g","fiberContent":"1 g","sugarContent":"1 g","proteinContent":"24 g","sodiumContent":"380 mg"}}</script></head><body></body></html>"#;
         let g = from_html(html, "https://www.example.com/seitan").unwrap();
@@ -524,6 +668,9 @@ Protein 25g";
         assert_eq!(g.food.name, "Bob's Red Mill Vital Wheat Gluten");
         assert!((g.food.per_serving.calories.unwrap() - 120.0).abs() < 0.1);
         assert!((g.food.per_serving.sodium_mg.unwrap() - 39.9).abs() < 0.1);
+        // the numbers belong to this barcode, so the food keeps it (a code that isn't one stays out)
+        assert_eq!(g.food.barcode, "039978003850");
+        assert_eq!(off_product(&v, "12345").unwrap().food.barcode, "");
         assert!(is_barcode("039978003850"));
         assert_eq!(off_barcode_from_url("https://world.openfoodfacts.org/product/3017620422003/nutella").as_deref(), Some("3017620422003"));
     }
@@ -551,6 +698,91 @@ Protein 25g";
         assert!(script.contains("$env:RECIPEBOX_OCR_IMAGE") && !script.contains("label.png"));
         assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-EncodedCommand"]); // no script file, no policy override
         assert_eq!(args.len(), 4);
+    }
+
+    #[test]
+    fn a_phone_photo_is_turned_the_way_it_was_taken() {
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_pixel(40, 20, image::Rgb([200, 200, 200])).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+        // EXIF segment right after the JPEG start: big-endian TIFF, one IFD entry, Orientation (0x0112) = 6 (turn 90° clockwise)
+        let exif: &[u8] = &[0xFF, 0xE1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2A, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0];
+        jpeg.splice(2..2, exif.iter().copied());
+        let path = std::env::temp_dir().join(format!("rb-orient-{}", crate::importer::unique_stamp()));
+        std::fs::write(&path, &jpeg).unwrap();
+        let img = open_upright(&path);
+        let _ = std::fs::remove_file(&path);
+        let img = img.unwrap();
+        assert_eq!((img.width(), img.height()), (20, 40));
+    }
+
+    #[test]
+    fn an_upside_down_label_is_read_on_the_second_try() {
+        let label = "Nutrition Facts Per 1 bar (60 g) Calories 240 Fat 9 g Carbohydrate 22 g Protein 21 g";
+        let img = image::DynamicImage::new_luma8(4, 2);
+        let tries = std::cell::Cell::new(0);
+        // the fake OCR finds nothing the right way up, the label once turned round
+        let g = read_either_way_up(&img, |_| { tries.set(tries.get() + 1); Ok(if tries.get() == 1 { "SPORT".into() } else { label.into() }) });
+        assert_eq!(g.unwrap().unwrap().food.per_serving.calories, Some(240.0));
+        assert_eq!(tries.get(), 2);
+        // a broken first reading is an error and isn't retried
+        tries.set(0);
+        let e = read_either_way_up(&img, |_| { tries.set(tries.get() + 1); Err("no OCR".into()) });
+        assert_eq!((e.unwrap_err(), tries.get()), ("no OCR".to_string(), 1));
+        // a broken second reading is just "not found"
+        tries.set(0);
+        let n = read_either_way_up(&img, |_| { tries.set(tries.get() + 1); if tries.get() == 1 { Ok(String::new()) } else { Err("no OCR".into()) } });
+        assert!(n.unwrap().is_none());
+    }
+
+    #[test]
+    fn upc_e_expands_to_upc_a() {
+        assert_eq!(upc_e_to_a("04252614").as_deref(), Some("042100005264"));
+        assert_eq!(upc_e_to_a("01234565").as_deref(), Some("012345000065"));
+        assert_eq!(upc_e_to_a("01234531").as_deref(), Some("012300000451"));
+        assert_eq!(upc_e_to_a("01234147").as_deref(), Some("012340000017"));
+        assert_eq!(upc_e_to_a("21234565"), None);
+    }
+
+    #[test]
+    fn a_barcode_counts_only_when_two_sizes_agree() {
+        let img = image::DynamicImage::new_luma8(2000, 1000);
+        let answers = |list: [Option<&'static str>; 3]| {
+            let n = std::cell::Cell::new(0);
+            agreed(&img, |_| { n.set(n.get() + 1); list[n.get() - 1].map(String::from) })
+        };
+        assert_eq!(answers([Some("A"), Some("B"), Some("C")]), None);
+        assert_eq!(answers([Some("A"), None, None]), None);
+        assert_eq!(answers([Some("A"), Some("B"), Some("A")]).as_deref(), Some("A"));
+        assert_eq!(answers([None, Some("B"), Some("B")]).as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn barcode_digits_read_as_text() {
+        // as Windows text recognition returned them for the owner's photos of a spray can and a tofu box
+        let can = "CHAUDE DU BARBECUE. NE PAS R\u{e9}FRJG\u{e9}RER\r\n8\r\n/ ART. '392843\r\n15074 02291\r\n5\r\n";
+        assert_eq!(code_from_digits(can).as_deref(), Some("815074022915"));
+        let tofu = "ITM. / ART. 9877788\r\n1\r\n96633 82371 7\r\n";
+        assert_eq!(code_from_digits(tofu).as_deref(), Some("196633823717"));
+        assert_eq!(code_from_digits("4 006381 333931").as_deref(), Some("4006381333931"));
+        assert_eq!(code_from_digits("9638 5074").as_deref(), Some("96385074"));
+        // a label's numbers, a wrong check digit, and two different codes are all "not found"
+        let label = "per 1/3 cup (100 g)\r\nCalories 45\r\nSodium 160 mg\r\nPotassium 125 mg\r\n70/0\r\n0 0/0\r\n3\r\ni\r\n11\r\n";
+        assert_eq!(code_from_digits(label), None);
+        assert_eq!(code_from_digits("1 96633 82371 8"), None);
+        assert_eq!(code_from_digits("1 96633 82371 7 / 4 006381 333931"), None);
+        // a date or lot code is one run, even when its check digit happens to fit
+        assert_eq!(code_from_digits("Best before 20261122\r\nLOT 815074022915"), None);
+    }
+
+    #[test]
+    fn a_printed_barcode_is_read_from_a_picture() {
+        use rxing::Writer;
+        let bars = rxing::MultiFormatWriter.encode("4006381333931", &rxing::BarcodeFormat::EAN_13, 600, 200).unwrap();
+        let path = std::env::temp_dir().join(format!("rb-barcode-{}.png", crate::importer::unique_stamp()));
+        image::DynamicImage::from(&bars).to_luma8().save(&path).unwrap();
+        let found = barcode_from_photo(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(found.unwrap().as_deref(), Some("4006381333931"));
     }
 
     #[cfg(windows)]

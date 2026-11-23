@@ -106,7 +106,8 @@
   }
 
   /** Fill the form from a product link, a barcode or a label photo. */
-  async function fill(job: () => Promise<api.LabelGuess>) {
+  /** `byLookup`: the numbers came from a barcode or link, so the food's barcode becomes that one (or none); a label photo keeps it */
+  async function fill(job: () => Promise<api.LabelGuess>, byLookup = false) {
     labelNote = { text: 'Looking it up…', warn: false };
     busy = true;
     try {
@@ -117,10 +118,13 @@
       draft.serving_ml = pos(g.food.serving_ml);
       draft.per_serving = { ...g.food.per_serving };
       draft.source = g.source;
+      // numbers from a lookup belong to its barcode (none for a link), never to the one the food had
+      if (byLookup) draft.barcode = g.food.barcode;
       let text = `Filled in from ${g.source}. Check the numbers against the label, then Save Food.`;
       if (g.missing.length) text += ` Not found: ${g.missing.join(', ')} (left blank).`;
       if (g.food.serving_g <= 0) text += ' Type in the serving’s weight in grams.';
-      labelNote = { text, warn: g.missing.length > 0 || g.food.serving_g <= 0 };
+      for (const c of g.check) text += ` ${c}`;
+      labelNote = { text, warn: g.missing.length > 0 || g.food.serving_g <= 0 || g.check.length > 0 };
     } catch (e) {
       if (String(e) === api.NEEDS_EMAIL) {
         labelNote = null; // nothing was sent
@@ -147,7 +151,7 @@
 <Dialog wide title={food.id ? 'Edit Food' : 'Add a Food'} onclose={requestClose}>
   <!-- the fields scroll, the buttons stay in view on a short window -->
   <div class="scroll">
-  <form class="fill" onsubmit={(e) => { e.preventDefault(); if (lookup.trim()) fill(() => api.labelLookup(lookup)); }}>
+  <form class="fill" onsubmit={(e) => { e.preventDefault(); if (lookup.trim()) fill(() => api.labelLookup(lookup), true); }}>
     <label class="label" for="food-lookup">Fill in from a product link or barcode</label>
     <span class="fillrow">
       <input id="food-lookup" name="lookup" bind:value={lookup} placeholder="https://… or 0123456789012" spellcheck="false" autocomplete="off" inputmode="url" />
@@ -156,6 +160,11 @@
     </span>
     <input bind:this={labelFile} type="file" accept="image/*" hidden onchange={labelPhoto} />
     <p class="fine" class:warn={labelNote?.warn} role="status">{labelNote?.text ?? ''}</p>
+    {#if draft.barcode}
+      <p class="fine barcode">Barcode {draft.barcode}. Once saved, scanning it finds this food.
+        <button type="button" class="btn ghost" onclick={() => (draft.barcode = '')}>Remove Barcode</button>
+      </p>
+    {/if}
   </form>
 
   <form id="food-form" class="ff" novalidate bind:this={formEl} onsubmit={(e) => { e.preventDefault(); save(); }}>
@@ -228,7 +237,7 @@
 </Dialog>
 
 {#if askEmail}
-  <OffEmailDialog onsaved={() => { const again = askEmail!; askEmail = null; fill(again); }} oncancel={() => (askEmail = null)} />
+  <OffEmailDialog onsaved={() => { const again = askEmail!; askEmail = null; fill(again, true); }} oncancel={() => (askEmail = null)} />
 {/if}
 
 {#if askDiscard}
@@ -256,6 +265,7 @@
   .ff { display: flex; flex-direction: column; gap: 12px; }
   .fill { display: flex; flex-direction: column; gap: 6px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
   .fillrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .barcode { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; }
   .fillrow input { flex: 1 1 220px; min-width: 0; }
   .f { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .f > label { font-size: 12.5px; }

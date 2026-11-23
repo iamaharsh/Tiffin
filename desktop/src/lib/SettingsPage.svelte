@@ -45,6 +45,7 @@
   let scope: 'recipes' | 'everything' = $state('recipes');
   let backupFile: HTMLInputElement | undefined = $state();
   let checks: api.Check[] | null = $state(null);
+  let askErase = $state(false);
 
   async function load() {
     try {
@@ -182,6 +183,10 @@
             <input bind:this={backupFile} type="file" accept=".recipebox" hidden onchange={chooseBackup} />
           </div>
           {@render versions('backup')}
+          <!-- disabled while any job runs: a backup already under way read the diary before the delete and would write it back -->
+          <h2 class="sub">Delete your health data</h2>
+          <p class="lead">Removes your food diary, exercise, body measurements and profile from this PC, with their snapshots, and takes them out of your backups. Recipes, photos, My Foods and settings stay.</p>
+          <div class="row"><button class="btn danger" disabled={busy !== ''} onclick={() => (askErase = true)}>{busy === 'erase' ? 'Deleting…' : 'Delete All Health Data…'}</button></div>
         {:else if tab === 'history'}
           <h2>Roll back to an earlier version</h2>
           <p class="lead">Snapshots are kept automatically: every 10 minutes of changes, and before imports, merges, syncs, restores, updates and deletions. Rolling back saves the current version first.</p>
@@ -300,6 +305,18 @@
               <button class="btn" disabled={update.status === 'checking'} onclick={() => checkForUpdate(true)}>Check for updates</button>
             {/if}
           </div>
+          <h2 class="sub">Data sources</h2>
+          <p class="lead">Food, nutrient and activity data in Tiffin comes from these sources, credited as each one asks.</p>
+          <ul class="sources">
+            {#each i.sources as s (s.name)}
+              <li>
+                <strong>{s.name}</strong>
+                <span class="fine">{s.used_for}</span>
+                <span class="fine">{s.licence}</span>
+                <span class="fine credit selectable">{s.credit}{#if !s.credit.includes(s.link)} <code>{s.link}</code>{/if}</span>
+              </li>
+            {/each}
+          </ul>
           <h2 class="sub">Tidy up</h2>
           <p class="lead">Find recipes saved more than once (same web address, or the same name and ingredients) and merge each into its older copy. Nothing is lost: missing details are filled in from the copy, and a snapshot goes to Version History first.</p>
           <div class="row"><button class="btn" disabled={busy === 'merge'} onclick={() => run('merge', api.mergeDuplicates, onchanged)}>{busy === 'merge' ? 'Merging…' : 'Find & Merge Duplicates'}</button></div>
@@ -368,6 +385,17 @@
   </Dialog>
 {/if}
 
+{#if askErase}
+  <Dialog title="Delete All Health Data?" onclose={() => (askErase = false)}>
+    <p style="margin:0;color:var(--ink)">Your food diary, exercise, body measurements and profile are deleted from this PC, with their snapshots, and taken out of every backup in <code>{info?.backups_dir}</code>.</p>
+    <p class="fine">This can’t be undone. Recipes, photos, My Foods and settings stay, in the library and in the backups.</p>
+    {#snippet actions()}
+      <button class="btn" onclick={() => (askErase = false)}>Cancel</button>
+      <button class="btn danger" onclick={() => { askErase = false; run('erase', api.deleteHealthData, () => { onchanged(); api.backups().then((l) => (list = l), (e) => onerror(String(e))); }); }}>Delete Health Data</button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 <style>
   .settings { display: flex; min-height: 100%; }
   .tabs { position: sticky; top: 0; align-self: flex-start; width: 230px; flex: none; height: 100vh; padding: 22px 10px; border-right: 1px solid var(--rule); display: flex; flex-direction: column; gap: 2px; }
@@ -394,6 +422,10 @@
   @keyframes turn { to { transform: rotate(360deg); } }
   .lead { margin: 0; color: var(--ink-2); max-width: 66ch; }
   .fine { margin: 0; font-size: 13px; color: var(--ink-2); }
+  .sources { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; max-width: 66ch; }
+  .sources li { display: flex; flex-direction: column; gap: 2px; }
+  .sources strong { font-weight: 600; }
+  .credit { font-style: italic; }
   .note { display: flex; flex-direction: column; gap: 4px; padding: 16px; border-radius: 12px; background: var(--well); }
   .note p { margin: 0; color: var(--ink-2); }
   .opts { display: flex; flex-direction: column; gap: 12px; }
@@ -426,6 +458,8 @@
   .btn:disabled { opacity: 0.55; }
   .btn.primary { color: #fff; background: var(--accent); box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15); }
   .btn.primary:hover:not(:disabled) { background: var(--accent-press); }
+  .btn.danger { color: var(--on-heart); background: var(--heart); box-shadow: none; }
+  .btn.danger:hover:not(:disabled) { background: var(--heart); filter: brightness(0.94); }
   .btn.ghost { background: none; box-shadow: none; color: var(--accent-text); }
   .btn.small { height: 28px; padding: 0 12px; font-size: 13px; }
   .table { border-radius: 12px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--rule); }

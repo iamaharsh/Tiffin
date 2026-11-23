@@ -20,6 +20,8 @@
   import PantryPage from './lib/PantryPage.svelte';
   import FoodsPage from './lib/FoodsPage.svelte';
   import DiaryPage from './lib/DiaryPage.svelte';
+  import HomePage from './lib/HomePage.svelte';
+  import ReportsPage from './lib/ReportsPage.svelte';
   import TargetsPage from './lib/TargetsPage.svelte';
   import BodyPage from './lib/BodyPage.svelte';
   import { targetsDirty } from './lib/targets.svelte';
@@ -36,7 +38,7 @@
   const remember = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
   let ov: Overview | null = $state(null);
-  let section: Section = $state('recipes');
+  let section: Section = $state('home');
   /** which Settings tab opens (another page can ask for one) */
   let settingsTab: 'sync' | 'backup' | 'history' | 'trackers' | 'claude' | 'about' = $state('sync');
   let view = $state('all');
@@ -92,9 +94,15 @@
   }
   const note = (msg: string, action: { label: string; run: () => void } | null = null) => fail(msg, true, action);
 
+  /** the tab Tiffin opens on is applied once, at start, and only while nothing has moved the window off the first page yet */
+  let launched = false;
   async function refresh() {
     try {
       ov = await api.overview();
+      if (!launched) {
+        launched = true;
+        if (section === 'home' && api.tabNames[ov.launch]) section = ov.launch;
+      }
       if (sort < 0) sort = ov.sort;
       await load();
       // assign only: reading `notice` here would make the effect that calls refresh() depend on it
@@ -421,6 +429,8 @@
     onsection={(s) => { if (!busyEditing()) { parkReview(); planFor = null; section = s; scroller.scrollTop = 0; } }}
     onview={chooseView}
     onpinned={openById}
+    onorder={async (order) => { try { await api.setSidebarOrder(order); ov = await api.overview(); } catch (e) { fail(String(e)); } }}
+    onlaunch={async (tab) => { try { await api.setLaunchPage(tab); ov = await api.overview(); note(`Tiffin will open on ${api.tabNames[tab]}.`); } catch (e) { fail(String(e)); } }}
   />
 
   <main bind:this={scroller} onscroll={() => (scrolled = scroller.scrollTop > 4)}>
@@ -483,6 +493,10 @@
       <PantryPage onerror={fail} onnote={note} />
     {:else if section === 'foods'}
       <FoodsPage bind:units={foodUnits} onchanged={refresh} onerror={fail} onnote={note} />
+    {:else if section === 'home'}
+      <HomePage onerror={fail} ongoto={(s) => { if (!busyEditing()) { parkReview(); planFor = null; section = s; scroller.scrollTop = 0; } }} />
+    {:else if section === 'reports'}
+      <ReportsPage onerror={fail} ongoto={(s) => { if (!busyEditing()) { parkReview(); planFor = null; section = s; scroller.scrollTop = 0; } }} />
     {:else if section === 'diary'}
       <DiaryPage units={foodUnits} onerror={fail} onnote={note} ongoto={(s) => { if (!busyEditing()) { parkReview(); planFor = null; section = s; scroller.scrollTop = 0; } }} />
     {:else if section === 'targets'}

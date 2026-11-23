@@ -672,6 +672,29 @@ pub fn restore_bundle(dir: &Path, b: &JournalBundle) -> Result<PathBuf, String> 
     Ok(kept)
 }
 
+/// Delete all health data: the diary section of every backup in `backup_dirs` first, then the whole journal
+/// folder (months, profile, `.bak` files, damaged copies, history snapshots and restore copies). A backup that
+/// can't be changed doesn't stop the rest; it is named in the message. Err only when the folder itself stays.
+pub fn delete_all(dir: &Path, backup_dirs: &[PathBuf]) -> Result<String, String> {
+    let (changed, failed) = storage::strip_diary(backup_dirs);
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // the backups already changed are said too, so the person knows where things stand
+        Err(e) => return Err(format!("Couldn't delete all of your health data in {}: {e}. The diary was taken out of {changed} backup{}. Close any program using that folder, then try again.", dir.display(), if changed == 1 { "" } else { "s" })),
+    }
+    let mut msg = match changed {
+        0 => "Deleted your food diary, exercise, body measurements and profile, with their snapshots.".to_string(),
+        1 => "Deleted your food diary, exercise, body measurements and profile, with their snapshots, and took them out of 1 backup.".to_string(),
+        n => format!("Deleted your food diary, exercise, body measurements and profile, with their snapshots, and took them out of {n} backups."),
+    };
+    if !failed.is_empty() {
+        let names: Vec<String> = failed.iter().map(|p| p.display().to_string()).collect();
+        msg.push_str(&format!(" These files couldn't be read or changed and may still hold a diary: {}.", names.join(", ")));
+    }
+    Ok(msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,5 +1156,46 @@ mod tests {
         for x in [d, n, g] {
             let _ = fs::remove_dir_all(&x);
         }
+    }
+
+    #[test]
+    fn delete_all_removes_the_journal_and_the_diary_in_backups_only() {
+        let d = tdir("deleteall");
+        let jdir = d.join("journal");
+        let bdir = d.join("backups");
+        let mut j = Journal::open(jdir.clone());
+        j.month_mut("2026-11").unwrap().entries.push(entry("Soup"));
+        j.save_dirty().unwrap();
+        j.month_mut("2026-11").unwrap().entries.push(entry("Bread"));
+        j.save_dirty().unwrap();
+        fs::create_dir_all(jdir.join("history").join("restore-x")).unwrap();
+        fs::write(jdir.join("history").join("restore-x").join("2026-10.json"), "{}").unwrap();
+        let mut lib = crate::model::Library::default();
+        lib.recipes.push(crate::model::Recipe { name: "Dal".into(), ..Default::default() });
+        let (bundle, _) = bundle_from_disk(&jdir);
+        let with = storage::backup_with_photos(&lib, &bdir, None, bundle.as_ref()).unwrap();
+        // a key a newer build wrote survives the strip
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&with).unwrap()).unwrap();
+        v["future"] = serde_json::json!(7);
+        fs::write(&with, v.to_string()).unwrap();
+        let without = bdir.join("plain.recipebox");
+        fs::copy(storage::backup_to(&lib, &bdir).unwrap(), &without).unwrap();
+        let plain_before = fs::read(&without).unwrap();
+        let stranger = bdir.join("other.recipebox");
+        fs::write(&stranger, r#"{"kind": "something-else", "journal": {"months": {}}}"#).unwrap();
+        let broken = bdir.join("broken.recipebox");
+        fs::write(&broken, r#"{"kind": "recipe-box-backup", "journal": "#).unwrap();
+
+        let msg = delete_all(&jdir, &[bdir.clone()]).unwrap();
+        assert!(!jdir.exists(), "months, .bak, history and restore copies are all gone");
+        assert!(msg.contains("1 backup"), "{msg}");
+        assert!(msg.contains("broken.recipebox") && !msg.contains("plain.recipebox") && !msg.contains("other.recipebox"), "a file that doesn't parse is named, the rest still went ahead: {msg}");
+        let b = storage::read_backup(&with).unwrap();
+        assert!(b.journal.is_none() && b.library.recipes.len() == 1 && b.library.recipes[0].name == "Dal");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&with).unwrap()).unwrap()["future"], 7);
+        assert_eq!(fs::read(&without).unwrap(), plain_before, "a backup without a diary is not rewritten");
+        assert!(fs::read_to_string(&stranger).unwrap().contains("journal"), "a file that isn't a Tiffin backup is left alone");
+        assert!(delete_all(&jdir, &[bdir.clone()]).unwrap().starts_with("Deleted"), "a second run with nothing left is fine");
+        let _ = fs::remove_dir_all(&d);
     }
 }

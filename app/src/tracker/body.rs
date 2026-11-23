@@ -128,7 +128,7 @@ const PLAUSIBLE_SHARE: f64 = 0.05;
 /// Every live weigh-in on or before `upto` as (day number, kg, day), ascending and one per day (a second one on
 /// a day can't happen through `set_value`, but a merged or restored file might hold it: the later logged wins).
 /// A month that won't open is skipped.
-fn live_weights(j: &mut Journal, upto: &str) -> Vec<(i32, f64, String)> {
+pub(crate) fn live_weights(j: &mut Journal, upto: &str) -> Vec<(i32, f64, String)> {
     let Ok(u) = Day::parse(upto) else { return vec![] };
     let months: Vec<String> = j.months_with_data().into_iter().filter(|m| m.as_str() <= u.month()).collect();
     let mut by_day: BTreeMap<i32, (u64, f64, String)> = BTreeMap::new();
@@ -170,8 +170,14 @@ pub fn trend(points: &[(i32, f64)]) -> Vec<(i32, f64)> {
 pub fn weight_basis(j: &mut Journal, day: &str) -> Option<WeightBasis> {
     let d = Day::parse(day).ok()?;
     let points = live_weights(j, d.as_str());
+    basis_from(&points, diary::day_number(d.as_str()).ok()?)
+}
+
+/// [`weight_basis`] from weigh-ins already read (as [`live_weights`] gives them), for many days at once without
+/// reading the journal again. Points after `today` are ignored.
+pub(crate) fn basis_from(points: &[(i32, f64, String)], today: i32) -> Option<WeightBasis> {
+    let points = &points[..points.partition_point(|p| p.0 <= today)];
     let (_, latest, latest_day) = points.last()?.clone();
-    let today = diary::day_number(d.as_str()).ok()?;
     let recent = points.iter().filter(|p| p.0 > today - TREND_WINDOW_DAYS).count();
     if recent >= TREND_MIN_WEIGH_INS {
         let series: Vec<(i32, f64)> = points.iter().map(|p| (p.0, p.1)).collect();
@@ -262,7 +268,7 @@ fn units_of(j: &mut Journal) -> UnitChoice {
     j.profile().map(|p| p.units).unwrap_or_default()
 }
 
-fn mass_word(u: MassUnit) -> &'static str {
+pub(crate) fn mass_word(u: MassUnit) -> &'static str {
     match u {
         MassUnit::Kg => "kg",
         MassUnit::Lb => "lb",
@@ -280,7 +286,7 @@ fn unit_text(kind: MeasureKind, u: &UnitChoice) -> &'static str {
 }
 
 /// One decimal, no trailing zero: "8000", "2.5".
-fn trimmed1(v: f64) -> String {
+pub(crate) fn trimmed1(v: f64) -> String {
     format!("{v:.1}").trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
@@ -478,7 +484,7 @@ pub enum BodyRange {
 
 impl BodyRange {
     /// Days in the range; None for All (from the first record).
-    fn days(self) -> Option<i32> {
+    pub(crate) fn days(self) -> Option<i32> {
         match self {
             BodyRange::W2 => Some(14),
             BodyRange::M1 => Some(30),
@@ -592,7 +598,7 @@ fn day_key(n: i32) -> String {
 }
 
 /// "Nov 17", with the year when it isn't `this_year`, built from the day's parts.
-fn date_short(n: i32, this_year: i32) -> String {
+pub(crate) fn date_short(n: i32, this_year: i32) -> String {
     let base = goals::date_text(&day_key(n));
     let y = civil_from_days(n).0;
     if y == this_year {
@@ -603,7 +609,7 @@ fn date_short(n: i32, this_year: i32) -> String {
 }
 
 /// "Tue, Nov 17", with the year when it isn't `this_year`.
-fn date_long(n: i32, this_year: i32) -> String {
+pub(crate) fn date_long(n: i32, this_year: i32) -> String {
     format!("{}, {}", WEEKDAYS[weekday(n) as usize], date_short(n, this_year))
 }
 
@@ -618,7 +624,7 @@ fn live_entries(j: &mut Journal) -> Vec<BodyEntry> {
     out
 }
 
-fn range_start(j: &mut Journal, range: BodyRange, today_n: i32) -> i32 {
+pub(crate) fn range_start(j: &mut Journal, range: BodyRange, today_n: i32) -> i32 {
     match range.days() {
         Some(n) => today_n - (n - 1),
         None => live_entries(j).iter().filter_map(|e| diary::day_number(&e.day).ok()).min().unwrap_or(today_n),
@@ -695,7 +701,7 @@ fn headline_parts(j: &mut Journal, today: &str, unit: MassUnit) -> Option<(Strin
     Some((goals::mass_text(latest, unit), rate))
 }
 
-fn range_name(range: BodyRange) -> &'static str {
+pub(crate) fn range_name(range: BodyRange) -> &'static str {
     match range {
         BodyRange::W2 => "last 2 weeks",
         BodyRange::M1 => "last month",

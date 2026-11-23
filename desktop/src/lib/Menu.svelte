@@ -82,7 +82,7 @@
   button:hover:not(:disabled), button:focus-visible { background: var(--accent); color: #fff; }
   button:disabled { color: var(--ink-3); }
   .danger { color: var(--heart); }
-  .danger:hover, .danger:focus-visible { background: var(--heart) !important; }
+  .danger:hover, .danger:focus-visible { background: var(--heart) !important; color: var(--on-heart) !important; }
   .ic { display: grid; place-items: center; width: 18px; color: inherit; opacity: 0.85; }
   hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--rule); }
 </style>

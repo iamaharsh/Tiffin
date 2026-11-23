@@ -14,7 +14,8 @@
   let { us, onerror, onadd, actions: extra, onenter, layout = 'page', today = '', day = '', mealSlot = 'Breakfast' }: {
     us: boolean;
     onerror: (m: string) => void;
-    onadd?: (name?: string) => void;
+    /** add a food: a typed name, or the barcode of a query that is one (so scanning it again finds the food) */
+    onadd?: (name?: string, barcode?: string) => void;
     actions?: Snippet<[Info]>;
     /** Enter in the Amount box: the host does what its primary button does */
     onenter?: (d: Info) => void;
@@ -32,6 +33,10 @@
   let rows: FoodRow[] = $state([]);
   let loaded = $state(false);
   let onlineReady = $state(false);
+  /** the query is a barcode's digits (the crate says so): an empty answer offers the label photo, not a spelling hint */
+  let barcode = $state(false);
+  /** the code to keep with a food added from here: the crate's cleaned-up barcode, or null when the digits don't add up */
+  let code: string | null = $state(null);
   let failure = $state('');
   let preparing = $state(false);
   let searching = $state(false);
@@ -77,7 +82,7 @@
     const mine = ++seq; // a slower older answer never replaces a newer one
     const timer = setTimeout(() => { if (mine === seq) preparing = true; }, 300);
     try {
-      let got: { rows: FoodRow[]; online_ready: boolean };
+      let got: { rows: FoodRow[]; online_ready: boolean; barcode: boolean; code: string | null };
       if (dialog) {
         const d = await api.diaryFoods(text, today, day, mealSlot);
         if (mine === seq && !history && !text.trim()) { planned = d.planned; recent = d.recent; frequent = d.frequent; history = true; }
@@ -85,7 +90,7 @@
       } else {
         got = await api.searchFoods(text);
       }
-      if (mine === seq) { rows = got.rows; onlineReady = got.online_ready; failure = ''; loaded = true; }
+      if (mine === seq) { rows = got.rows; onlineReady = got.online_ready; barcode = got.barcode; code = got.code; failure = ''; loaded = true; }
     } catch (e) {
       if (mine === seq) failure = String(e);
       onerror(String(e));
@@ -110,6 +115,60 @@
     untrack(() => search(''));
   });
 
+  let barcodeFile: HTMLInputElement | undefined = $state();
+  let scanning = $state(false);
+  /** A photo of a barcode, read on this PC: the digits go in the box to check against the pack, and a product kept before shows at once. */
+  async function scanPhoto(file: File) {
+    if (scanning) return;
+    scanning = true;
+    status = { text: 'Reading the barcode…', warn: false };
+    const before = q; // reading can take seconds: typing in the meantime wins
+    try {
+      const read = await api.barcodePhoto(file);
+      if (q !== before) return;
+      if (read) {
+        q = read;
+        await search(read);
+        // what to do next is the list's or the empty state's to say; the line only says what was read
+        if (q === read && !failure) status = { text: rows.length ? `Read barcode ${read}. Pick it below to add it.` : `Read barcode ${read}.`, warn: false };
+        // not saved here and the digits add up (the crate's `code`): look it up online at once, as pressing Search Online
+        // would; no contact email yet opens the email prompt, which carries on with the lookup once saved
+        // the scan button stays busy until the lookup ends, so a second scan never starts one that can't run
+        if (q === read && !failure && !rows.length && barcode && code) await searchOnline();
+      } else {
+        // an earlier barcode and its "no saved product" answer would contradict this, so they go; words typed by hand stay
+        if (barcode) {
+          q = '';
+          await search('');
+        }
+        status = { text: 'No barcode found in that photo. Type the number printed under the bars, or add the food from a photo of its label.', warn: true };
+        await tick();
+        // reading can take seconds: someone already typing an amount in the food's panel keeps their place
+        if (!panel?.contains(document.activeElement)) box?.focus();
+      }
+    } catch (e) {
+      status = { text: String(e), warn: true };
+    } finally {
+      scanning = false;
+    }
+  }
+  function pickedBarcode(e: Event & { currentTarget: HTMLInputElement }) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = '';
+    if (file) scanPhoto(file);
+  }
+  /** A picture dropped on the search is read as a barcode photo. Any dropped file is taken here, so the window never opens it;
+   *  not while a food's sheet covers the list (that drop was meant for the sheet). */
+  function dropped(e: DragEvent) {
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (!files.length) return;
+    e.preventDefault();
+    if (open && !split) return;
+    const file = files.find((f) => f.type.startsWith('image/'));
+    if (file) scanPhoto(file);
+    else status = { text: 'That isn’t a picture. Drop a photo of the barcode (JPEG, PNG, WebP, GIF or BMP).', warn: true };
+  }
+
   const canOnline = $derived(onlineReady && !searching && cooldown <= 0);
   const cooling = $derived(cooldown > 0);
   $effect(() => {
@@ -125,10 +184,12 @@
       case 'offline': return { text: "Online results unavailable: this PC can't reach Open Food Facts. Search on this PC still works.", warn: true };
       case 'slow': return { text: "Open Food Facts didn't answer. Try again in a moment. Search on this PC still works.", warn: true };
       case 'limited': return { text: `Open Food Facts asked us to slow down. Online search will be ready in ${r.retry_in} s.`, warn: true };
+      case 'bad_barcode': return { text: `The barcode ${text.trim()} doesn’t add up, so nothing was sent. Check the digits against the pack.`, warn: true };
+      case 'no_product': return { text: `Open Food Facts doesn’t list barcode ${text.trim()}. Add the food from a photo of its label.`, warn: true };
       default: return null;
     }
   }
-  /** The only place that talks to Open Food Facts: the button and Ctrl+Enter, never typing. */
+  /** The only place that talks to Open Food Facts: the button, Ctrl+Enter and a scanned barcode not saved here, never typing. */
   async function searchOnline() {
     // the crate says when a query is long enough to send; the page counts no letters
     if (!canOnline) return;
@@ -167,6 +228,17 @@
     status = null;
     open = null;
     search('');
+    await tick();
+    box?.focus();
+  }
+  /** Put `text` in the box and search it, saying `note` (after a food is saved from here, so it can be picked at once). */
+  export async function show(text: string, note: string) {
+    q = text;
+    open = null;
+    await search(text);
+    // typing in the meantime, or a failed search, wins over the note
+    if (q === text && !failure) status = { text: note, warn: false, ok: true };
+    // the button that opened the form is gone with the empty state, so the cursor goes back to the box
     await tick();
     box?.focus();
   }
@@ -289,10 +361,22 @@
     {/if}
   {:else}
     {#if loaded && !rows.length}
-      {#if trimmed}
+      {#if trimmed && barcode && !code}
+        <div class="empty">
+          <h2>Barcode {trimmed} doesn’t add up</h2>
+          <p>Check the digits against the pack, or add the food from a photo of its label.</p>
+          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd()}>Add a Food from Its Label</button>{/if}
+        </div>
+      {:else if trimmed && barcode}
+        <div class="empty">
+          <h2>No saved product with barcode {trimmed}</h2>
+          <p>Press Search Online to look it up on Open Food Facts, or add the food from a photo of its label.</p>
+          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(undefined, code ?? undefined)}>Add a Food from Its Label</button>{/if}
+        </div>
+      {:else if trimmed}
         <div class="empty">
           <h2>No foods match “{trimmed}”</h2>
-          <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. You can also add it yourself.</p>
+          <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. Still nothing? Scan its barcode, or add it yourself from its label or by hand.</p>
           {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(trimmed)}>Add “{trimmed}” as a Food</button>{/if}
         </div>
       {:else}
@@ -315,7 +399,7 @@
   {/if}
 {/snippet}
 
-<div class="search" class:dlg={dialog}>
+<div class="search" class:dlg={dialog} role="group" aria-label="Food search" ondragover={(e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); }} ondrop={dropped}>
   <div class="bar">
     <Icon name="search" size={18} />
     <input
@@ -329,6 +413,18 @@
       autocomplete="off"
       spellcheck="false"
     />
+    <button
+      type="button"
+      class="online scan"
+      aria-busy={scanning}
+      aria-disabled={scanning}
+      title="Read the barcode from a photo of the pack, on this PC. You can also drop the photo here."
+      onclick={() => { if (!scanning) barcodeFile?.click(); }}
+    >
+      <Icon name="photo" size={16} />
+      {scanning ? 'Reading…' : 'Scan Barcode…'}
+    </button>
+    <input bind:this={barcodeFile} type="file" accept="image/*" hidden onchange={pickedBarcode} />
     <button
       type="button"
       class="online"
@@ -446,6 +542,8 @@
   .online[aria-disabled='true'] { opacity: 0.55; cursor: default; }
   .online[aria-disabled='true']:hover { background: var(--well); }
   .online.retry { min-width: 0; }
+  /* wide enough for "Reading…" and "Scan Barcode…", so the bar never shifts */
+  .online.scan { min-width: 148px; }
 
   .status { display: flex; align-items: flex-start; gap: 6px; min-height: 20px; margin: 8px 0 12px; padding: 0 4px; }
   .status.warn { color: var(--warn); }

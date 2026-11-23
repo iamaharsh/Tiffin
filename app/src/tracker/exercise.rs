@@ -222,8 +222,7 @@ pub fn delete_activity(j: &mut Journal, uid: &str) -> Result<String, String> {
 const MET_TABLE: &str = include_str!("../../data/mets.tsv");
 /// The first words of the line a header-only stand-in carries. The public release snapshot compiles the stand-in until the
 /// maintainers allow the rows to ship (RESEARCH Open Question 1), so an empty table is a normal case, not an error.
-/// Only the tests need to tell the two apart.
-#[cfg(test)]
+/// The About screen's credits and the tests tell the two apart.
 const STAND_IN: &str = "# Stand-in:";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -277,8 +276,7 @@ fn table() -> &'static [Met] {
 }
 
 /// True when the compiled table holds the Compendium rows rather than the stand-in.
-#[cfg(test)]
-fn full_table() -> bool {
+pub fn full_table() -> bool {
     !MET_TABLE.lines().any(|l| l.starts_with(STAND_IN))
 }
 

@@ -2,9 +2,11 @@
   import Dialog from './Dialog.svelte';
   import FoodSearch from './FoodSearch.svelte';
   import QuickAddDialog from './QuickAddDialog.svelte';
+  import FoodForm from './FoodForm.svelte';
+  import { holdsUnsaved } from './updates.svelte';
   import Icon from './Icon.svelte';
   import * as api from './api';
-  import type { DayView, FoodDetail as Info, MealType } from './api';
+  import type { DayView, FoodDetail as Info, MealType, MyFood } from './api';
 
   // Add Food to {Meal}: the Foods search and detail. Add to {Meal} is the footer's primary button, so it never scrolls away; it logs the
   // amount and unit chosen in the panel. Done Adding is the secondary. The dialog stays open, so a whole meal goes in during one visit.
@@ -24,8 +26,11 @@
 
   let failure = $state('');
   let quick = $state(false);
+  /** a food being added to My Foods from here (not found, or from its label); logged from the search once saved */
+  let adding: MyFood | null = $state(null);
+  holdsUnsaved(() => adding !== null);
   let busy = false;
-  let search: { clear: () => void; confirm: (text: string) => void; escape: () => boolean; chosen: () => Info | null } | undefined = $state();
+  let search: { clear: () => void; confirm: (text: string) => void; escape: () => boolean; chosen: () => Info | null; show: (text: string, note: string) => Promise<void> } | undefined = $state();
 
   async function addFood(d: Info) {
     if (busy) return;
@@ -49,7 +54,7 @@
 
 <!-- Esc undoes typed text, then a stacked detail, and only then closes; a click outside and Done Adding close at once -->
 <Dialog large title="Add Food to {label}" {onclose} oncancel={() => { if (!search?.escape()) onclose(); }}>
-  <FoodSearch bind:this={search} layout="dialog" {today} {day} mealSlot={slot} {us} {onerror} onenter={addFood} />
+  <FoodSearch bind:this={search} layout="dialog" {today} {day} mealSlot={slot} {us} {onerror} onenter={addFood} onadd={(name, barcode) => (adding = { ...api.blankFood(name), barcode: barcode ?? '' })} />
   {#if failure}
     <p class="notice" role="alert"><Icon name="warn" size={16} />{failure}</p>
   {/if}
@@ -64,6 +69,18 @@
     >Add to {label}</button>
   {/snippet}
 </Dialog>
+
+{#if adding}
+  <FoodForm
+    food={adding}
+    onclose={() => (adding = null)}
+    onsaved={(f) => {
+      adding = null;
+      search?.show(f.name, `Saved ${f.name}. Pick it below to add it to ${label}.`);
+    }}
+    {onerror}
+  />
+{/if}
 
 {#if quick}
   <QuickAddDialog

@@ -135,13 +135,17 @@ fn finish(shared: &Shared, off: &OffState, q: &str, answer: off::OffAnswer, now:
 pub(crate) struct FoodResults {
     rows: Vec<FoodRow>,
     online_ready: bool,
+    /// the query is a barcode's digits, so an empty answer offers the label photo, not a spelling hint
+    barcode: bool,
+    /// the barcode itself, cleaned up (a typed UPC-E as its UPC-A), or None when the digits don't add up
+    code: Option<String>,
 }
 
 /// Local search on every keystroke: the bundled foods, My Foods and the cached online products. No network.
 #[tauri::command]
 pub(crate) fn search_foods(state: tauri::State<Shared>, off: tauri::State<OffState>, q: String) -> Result<FoodResults, String> {
     // the hits of the last online search show only in its own result, so they go when the query changes
-    Ok(FoodResults { rows: rows(&state, &off, &q, false), online_ready: off::query_ready(&q) })
+    Ok(FoodResults { rows: rows(&state, &off, &q, false), online_ready: off::query_ready(&q), barcode: off::barcode_in(&q).is_some(), code: off::barcode_in(&q).and_then(Result::ok) })
 }
 
 /// Open a food (a row's key) with its units. Looks in the last online hits too, so an opened online row resolves.
@@ -195,6 +199,12 @@ pub(crate) async fn off_search(state: tauri::State<'_, Shared>, off: tauri::Stat
     if !off::query_ready(&q) {
         return Err("Type at least two letters to search online.".into());
     }
+    // a barcode is looked up as one product; digits that don't add up are refused before anything is sent
+    let barcode = match off::barcode_in(&q) {
+        Some(Err(_)) => return Ok(OnlineResult { status: "bad_barcode", retry_in: 0, added: 0, rows: rows(&state, &off, &q, false) }),
+        Some(Ok(code)) => Some(code),
+        None => None,
+    };
     // no email, no send: the page asks for one, and the limiter doesn't count a request that never left
     if off::valid_email(&state.lock().unwrap().lib.settings.off_email).is_err() {
         return Ok(finish(&state, &off, &q, off::OffAnswer::NeedsEmail, model::now_secs()));
@@ -204,8 +214,42 @@ pub(crate) async fn off_search(state: tauri::State<'_, Shared>, off: tauri::Stat
     }
     let text = q.trim().to_string();
     let email = state.lock().unwrap().lib.settings.off_email.clone();
-    let answer = tauri::async_runtime::spawn_blocking(move || off::search(&text, &email)).await.map_err(|e| e.to_string())?;
-    Ok(finish(&state, &off, &q, answer, model::now_secs()))
+    let answer = tauri::async_runtime::spawn_blocking(move || match barcode {
+        // the code passed barcode_in, so product() can't refuse it; a refusal would read as "slow"
+        Some(code) => off::product(&code, &email).unwrap_or(off::OffAnswer::Slow),
+        None => off::search(&text, &email),
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(named(finish(&state, &off, &q, answer, model::now_secs()), off::barcode_in(&q).is_some()))
+}
+
+/// A barcode the service doesn't list is its own answer, so the page can offer the label photo next.
+fn named(mut r: OnlineResult, barcode: bool) -> OnlineResult {
+    if barcode && r.status == "empty" {
+        r.status = "no_product";
+    }
+    r
+}
+
+/// A photo of a product's barcode (raw bytes) → the code printed on it, or `None` when none can be read. Offline.
+#[tauri::command]
+pub(crate) async fn barcode_photo(request: tauri::ipc::Request<'_>) -> Result<Option<String>, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("No picture was sent.".into());
+    };
+    // one file per call, so two scans at once can't read each other's picture
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("recipebox-barcode-in-{}-{stamp}", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    let res = tauri::async_runtime::spawn_blocking({
+        let tmp = tmp.clone();
+        move || recipe_box::labels::barcode_from_photo(&tmp)
+    })
+    .await
+    .map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&tmp);
+    res?
 }
 
 /// Save, change or clear (empty) the contact email Open Food Facts is told about. The rule is `off::valid_email`; the error is its message.
@@ -242,6 +286,23 @@ mod tests {
 
     fn hit(code: &str, name: &str) -> OnlineFood {
         OnlineFood { code: code.into(), name: name.into(), brands: "Fage".into(), per100: Nutrients { calories: Some(59.0), ..Default::default() }, ..Default::default() }
+    }
+
+    #[test]
+    fn a_barcode_search_names_its_answers_and_finds_a_kept_product() {
+        let d = tdir("barcode");
+        let shared = with_my_food(&d);
+        let off = OffState::new(&d);
+        // the service doesn't list it: its own status, so the page can offer the label photo; a text search stays "empty"
+        assert_eq!(named(finish(&shared, &off, "196633823717", off::OffAnswer::Empty, 1000), true).status, "no_product");
+        assert_eq!(named(finish(&shared, &off, "tofu", off::OffAnswer::Empty, 1000), false).status, "empty");
+        assert_eq!(named(finish(&shared, &off, "196633823717", off::OffAnswer::Offline, 1000), true).status, "offline");
+        // found once and opened, the product comes back offline from the digits alone
+        finish(&shared, &off, "196633823717", off::OffAnswer::Found(vec![hit("0196633823717", "Extra Firm Tofu")]), 1000);
+        open_online(&off, "0196633823717").unwrap();
+        off.0.lock().unwrap().hits.clear();
+        let r = rows(&shared, &off, "196633823717", false);
+        assert_eq!(r.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["off:0196633823717"]);
     }
 
     #[test]

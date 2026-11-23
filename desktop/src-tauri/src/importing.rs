@@ -310,7 +310,7 @@ pub(crate) async fn take_inbox(state: tauri::State<'_, Shared>) -> Result<Inbox,
                     continue;
                 }
                 match mutate(&state, |st| {
-                    nutrition::save_my_food(&mut st.lib, f);
+                    nutrition::save_my_food_from_file(&mut st.lib, f);
                     Ok(())
                 }) {
                     Ok(()) => out.notes.push(format!("Added {food} to My Foods. Recipes updated.")),
