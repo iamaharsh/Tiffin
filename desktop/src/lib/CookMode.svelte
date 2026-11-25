@@ -52,11 +52,41 @@
     return () => opener?.focus();
   });
 
-  // Keep the screen on while cooking (hands are busy); released when cook mode closes.
+  // Keep the screen on while cooking (hands are busy); re-acquire when returning to the tab and release on close.
   $effect(() => {
+    let active = true;
+    let acquiring = false;
     let lock: WakeLockSentinel | null = null;
-    navigator.wakeLock?.request('screen').then((l) => (lock = l)).catch(() => {});
-    return () => { lock?.release(); };
+    const acquire = () => {
+      if (!active || document.hidden || lock || acquiring || !navigator.wakeLock) return;
+      acquiring = true;
+      navigator.wakeLock.request('screen')
+        .then((l) => {
+          if (!active || document.hidden || lock) {
+            l.release().catch(() => {});
+            return;
+          }
+          lock = l;
+          l.addEventListener('release', () => {
+            if (lock === l) lock = null;
+          }, { once: true });
+        })
+        .catch(() => {})
+        .finally(() => {
+          acquiring = false;
+        });
+    };
+    const onVisibility = () => {
+      if (!document.hidden) acquire();
+    };
+    acquire();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      active = false;
+      document.removeEventListener('visibilitychange', onVisibility);
+      lock?.release().catch(() => {});
+      lock = null;
+    };
   });
 
   const slide = (node: Element, { out }: { out: boolean }) =>

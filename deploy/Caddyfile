@@ -1,0 +1,87 @@
+# Self-hosted Caddyfile for Tiffin on the web and tiffin-helper.
+# Automatic HTTPS is enabled by default for public domain names.
+#
+# Environment variables (optional, bare hostnames with NO https:// scheme):
+#   TIFFIN_DOMAIN        (default: tiffin.fyi)
+#   TIFFIN_HELPER_DOMAIN (default: helper.tiffin.fyi)
+#
+# HSTS rollout note: starts at max-age=300 so a DNS/TLS misconfiguration never locks out visitors.
+# Once HTTPS is verified in production, raise to: max-age=31536000; includeSubDomains
+
+{
+	# Keep startup/ACME/TLS logs, but never write request URIs (?url=, ?q=, &email=) or client IPs
+	# to disk when reverse_proxy encounters an upstream error.
+	log default {
+		exclude http.log.error
+	}
+}
+
+{$TIFFIN_DOMAIN:tiffin.fyi} {
+	# Never write visitor IPs or URLs to disk access logs.
+	log {
+		output discard
+	}
+
+	root * /srv/tiffin
+	encode zstd gzip
+
+	# Block host-control files if dist-web is mounted directly.
+	@internal path /_headers
+	respond @internal 404
+
+	# Canonicalize legacy privacy paths without redirecting /privacy/ itself (SW precaches /privacy/).
+	@privacy_alias path /privacy /privacy.html
+	redir @privacy_alias /privacy/ 308
+
+	# Strip Server header in its own directive so auto-deferral never affects Cache-Control or CSP.
+	header -Server
+
+	# Shared isolation and companion security headers (never overridden by route matchers).
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+		Cross-Origin-Resource-Policy "same-origin"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=300; includeSubDomains"
+	}
+
+	# Route-specific overrides run before the global "?" fallback defaults below.
+	@privacy path /privacy /privacy/* /privacy.html
+	header @privacy {
+		Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+		Permissions-Policy "camera=(), screen-wake-lock=(), microphone=(), geolocation=(), payment=(), usb=()"
+	}
+
+	# Content-hashed Vite assets are immutable.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# Fallback defaults ("?" only sets the header when no route matcher above set it).
+	header {
+		?Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self' https://world.openfoodfacts.org https://{$TIFFIN_HELPER_DOMAIN:helper.tiffin.fyi}; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+		?Permissions-Policy "camera=(self), screen-wake-lock=(self), microphone=(), geolocation=(), payment=(), usb=()"
+		?Cache-Control "no-cache"
+	}
+
+	file_server {
+		hide .* _headers
+	}
+}
+
+{$TIFFIN_HELPER_DOMAIN:helper.tiffin.fyi} {
+	# Critical for privacy: helper routes carry ?url=, ?q=, and &email= in the query string,
+	# so access logging MUST stay off here.
+	log {
+		output discard
+	}
+
+	header -Server
+	header Strict-Transport-Security "max-age=300; includeSubDomains"
+
+	# When internet-facing, Caddy replaces untrusted incoming X-Forwarded-For with the direct peer IP,
+	# matching TIFFIN_BEHIND_PROXY=1 on tiffin-helper. (If placing another proxy/CDN in front of Caddy,
+	# configure Caddy's trusted_proxies so visitors don't share one rate-limit bucket.)
+	reverse_proxy tiffin-helper:8787
+}

@@ -9,7 +9,7 @@ use recipe_box::model::{self, Expiry, GroceryItem, GroceryList, PantryItem};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
-pub(crate) struct Item {
+pub struct Item {
     id: u64,
     name: String,
     quantity: String,
@@ -23,7 +23,7 @@ pub(crate) struct Item {
 }
 
 #[derive(Serialize)]
-pub(crate) struct Pantry {
+pub struct Pantry {
     items: Vec<Item>,
     /// 0 section, 1 date added, 2 expiration date, 3 in stock (the classic settings value)
     sort: u8,
@@ -42,11 +42,10 @@ fn expiry_word(e: i32, today: i32) -> &'static str {
     }
 }
 
-#[tauri::command]
-pub(crate) fn pantry(state: tauri::State<Shared>) -> Pantry {
+pub fn pantry(state: &Shared) -> Result<Pantry, String> {
     let s = state.lock().unwrap();
     let today = model::today();
-    Pantry {
+    Ok(Pantry {
         items: s
             .lib
             .pantry
@@ -67,12 +66,11 @@ pub(crate) fn pantry(state: tauri::State<Shared>) -> Pantry {
         aisles: all_aisles(),
         lists: s.lib.grocery_lists.iter().map(|l| (l.id, l.name.clone())).collect(),
         today,
-    }
+    })
 }
 
 /// Quick add: "2 lbs flour", bought today, in stock, filed under its store section.
-#[tauri::command]
-pub(crate) fn add_pantry(state: tauri::State<Shared>, text: String) -> Result<(), String> {
+pub fn add_pantry(state: &Shared, text: String) -> Result<(), String> {
     let (name, quantity) = split_quick_add(&text);
     if name.trim().is_empty() {
         return Ok(());
@@ -95,7 +93,7 @@ pub(crate) fn add_pantry(state: tauri::State<Shared>, text: String) -> Result<()
 
 /// The item as edited (every field, so a date can be cleared).
 #[derive(Deserialize)]
-pub(crate) struct PantryEdit {
+pub struct PantryEdit {
     id: u64,
     name: String,
     quantity: String,
@@ -105,8 +103,7 @@ pub(crate) struct PantryEdit {
     in_stock: bool,
 }
 
-#[tauri::command]
-pub(crate) fn update_pantry(state: tauri::State<Shared>, item: PantryEdit) -> Result<(), String> {
+pub fn update_pantry(state: &Shared, item: PantryEdit) -> Result<(), String> {
     if item.name.trim().is_empty() {
         return Err("Give the item a name.".into());
     }
@@ -123,8 +120,7 @@ pub(crate) fn update_pantry(state: tauri::State<Shared>, item: PantryEdit) -> Re
     })
 }
 
-#[tauri::command]
-pub(crate) fn delete_pantry(state: tauri::State<Shared>, id: u64) -> Result<Option<String>, String> {
+pub fn delete_pantry(state: &Shared, id: u64) -> Result<Option<String>, String> {
     undoable_single(&state, "before deleting a pantry item", |_| "Deleted 1 item".into(), |lib| {
         let before = lib.pantry.len();
         lib.pantry.retain(|p| p.id != id);
@@ -132,8 +128,7 @@ pub(crate) fn delete_pantry(state: tauri::State<Shared>, id: u64) -> Result<Opti
     })
 }
 
-#[tauri::command]
-pub(crate) fn remove_expired(state: tauri::State<Shared>) -> Result<Option<String>, String> {
+pub fn remove_expired(state: &Shared) -> Result<Option<String>, String> {
     let today = model::today();
     undoable(&state, "before removing expired items", |n| format!("Removed {n} expired item{}", if n == 1 { "" } else { "s" }), |lib| {
         let before = lib.pantry.len();
@@ -142,8 +137,7 @@ pub(crate) fn remove_expired(state: tauri::State<Shared>) -> Result<Option<Strin
     })
 }
 
-#[tauri::command]
-pub(crate) fn remove_out_of_stock(state: tauri::State<Shared>) -> Result<Option<String>, String> {
+pub fn remove_out_of_stock(state: &Shared) -> Result<Option<String>, String> {
     undoable(&state, "before removing out of stock items", |n| format!("Removed {n} out of stock item{}", if n == 1 { "" } else { "s" }), |lib| {
         let before = lib.pantry.len();
         lib.pantry.retain(|p| p.in_stock);
@@ -152,8 +146,7 @@ pub(crate) fn remove_out_of_stock(state: tauri::State<Shared>) -> Result<Option<
 }
 
 /// Put chosen pantry items on a grocery list, skipping ones already there and not yet bought.
-#[tauri::command]
-pub(crate) fn pantry_to_list(state: tauri::State<Shared>, ids: Vec<u64>, list: u64) -> Result<String, String> {
+pub fn pantry_to_list(state: &Shared, ids: Vec<u64>, list: u64) -> Result<String, String> {
     mutate(&state, |st| {
         let lib = &mut st.lib;
         if lib.grocery_lists.is_empty() {
@@ -180,8 +173,7 @@ pub(crate) fn pantry_to_list(state: tauri::State<Shared>, ids: Vec<u64>, list: u
     })
 }
 
-#[tauri::command]
-pub(crate) fn set_pantry_sort(state: tauri::State<Shared>, sort: u8) -> Result<(), String> {
+pub fn set_pantry_sort(state: &Shared, sort: u8) -> Result<(), String> {
     mutate(&state, |st| {
         st.lib.settings.pantry_sort = sort.min(3);
         Ok(())

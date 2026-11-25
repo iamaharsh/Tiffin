@@ -196,7 +196,7 @@ mod tests {
     use std::fs;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-trends-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-trends-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

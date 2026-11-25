@@ -1,14 +1,27 @@
 <script lang="ts">
   import FoodArt from './FoodArt.svelte';
-  import { photoUrl } from './api';
+  import { photoUrl, loadPhotoUrl } from './api';
   // The recipe's photo, or its painted plate when there is none (or the file is missing).
   let { photo, seed }: { photo: string; seed: number } = $props();
-  let failed = $state(false);
-  $effect(() => { photo; failed = false; });
+  let failedFor = $state('');
+  let loaded = $state<{ name: string; url: string } | null>(null);
+  const direct = $derived(photo ? photoUrl(photo) : '');
+  const src = $derived(direct || (loaded?.name === photo ? loaded.url : ''));
+  const failed = $derived(failedFor === photo && photo !== '');
+  $effect(() => {
+    const current = photo;
+    if (!current || direct) return;
+    let alive = true;
+    loadPhotoUrl(current).then(
+      (url) => { if (alive) loaded = { name: current, url }; },
+      () => { if (alive) failedFor = current; },
+    );
+    return () => { alive = false; };
+  });
 </script>
 
-{#if photo && !failed}
-  <img src={photoUrl(photo)} alt="" draggable="false" loading="lazy" decoding="async" onerror={() => (failed = true)} />
+{#if photo && !failed && src}
+  <img {src} alt="" draggable="false" loading="lazy" decoding="async" onerror={() => (failedFor = photo)} />
 {:else}
   <FoodArt {seed} />
 {/if}

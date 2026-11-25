@@ -4,6 +4,7 @@
   import Dialog from './Dialog.svelte';
   import FoodDetail from './FoodDetail.svelte';
   import OffEmailDialog from './OffEmailDialog.svelte';
+  import BarcodeCamera from './BarcodeCamera.svelte';
   import SourceTag from './SourceTag.svelte';
   import * as api from './api';
   import type { FoodDetail as Info, FoodRow, MealType, OnlineResult } from './api';
@@ -117,7 +118,21 @@
 
   let barcodeFile: HTMLInputElement | undefined = $state();
   let scanning = $state(false);
-  /** A photo of a barcode, read on this PC: the digits go in the box to check against the pack, and a product kept before shows at once. */
+  let cameraOpen = $state(false);
+  const canCamera = api.isWeb && typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function';
+
+  /** Apply a barcode read from a photo or the camera: search locally, and look up online if not saved yet. */
+  async function applyScannedCode(read: string) {
+    q = read;
+    await search(read);
+    // what to do next is the list's or the empty state's to say; the line only says what was read
+    if (q === read && !failure) status = { text: rows.length ? `Read barcode ${read}. Pick it below to add it.` : `Read barcode ${read}.`, warn: false };
+    // not saved here and the digits add up (the crate's `code`): look it up online at once, as pressing Search Online
+    // would; no contact email yet opens the email prompt, which carries on with the lookup once saved
+    if (q === read && !failure && !rows.length && barcode && code) await searchOnline();
+  }
+
+  /** A photo of a barcode, read on this device: the digits go in the box to check against the pack, and a product kept before shows at once. */
   async function scanPhoto(file: File) {
     if (scanning) return;
     scanning = true;
@@ -127,21 +142,19 @@
       const read = await api.barcodePhoto(file);
       if (q !== before) return;
       if (read) {
-        q = read;
-        await search(read);
-        // what to do next is the list's or the empty state's to say; the line only says what was read
-        if (q === read && !failure) status = { text: rows.length ? `Read barcode ${read}. Pick it below to add it.` : `Read barcode ${read}.`, warn: false };
-        // not saved here and the digits add up (the crate's `code`): look it up online at once, as pressing Search Online
-        // would; no contact email yet opens the email prompt, which carries on with the lookup once saved
-        // the scan button stays busy until the lookup ends, so a second scan never starts one that can't run
-        if (q === read && !failure && !rows.length && barcode && code) await searchOnline();
+        await applyScannedCode(read);
       } else {
         // an earlier barcode and its "no saved product" answer would contradict this, so they go; words typed by hand stay
         if (barcode) {
           q = '';
           await search('');
         }
-        status = { text: 'No barcode found in that photo. Type the number printed under the bars, or add the food from a photo of its label.', warn: true };
+        status = {
+          text: api.isWeb
+            ? 'No barcode found in that photo. Type the number printed under the bars, or add the food by hand.'
+            : 'No barcode found in that photo. Type the number printed under the bars, or add the food from a photo of its label.',
+          warn: true,
+        };
         await tick();
         // reading can take seconds: someone already typing an amount in the food's panel keeps their place
         if (!panel?.contains(document.activeElement)) box?.focus();
@@ -181,11 +194,16 @@
     switch (r.status) {
       case 'ok': return { text: `Added ${r.added} online result${r.added === 1 ? '' : 's'} from Open Food Facts.`, warn: false };
       case 'empty': return { text: `Open Food Facts has nothing for “${text}”. Your own results are still listed.`, warn: false };
-      case 'offline': return { text: "Online results unavailable: this PC can't reach Open Food Facts. Search on this PC still works.", warn: true };
-      case 'slow': return { text: "Open Food Facts didn't answer. Try again in a moment. Search on this PC still works.", warn: true };
+      case 'offline': return { text: `Online results unavailable: ${api.isWeb ? 'this browser' : 'this PC'} can't reach Open Food Facts. Search ${api.isWeb ? 'in this browser' : 'on this PC'} still works.`, warn: true };
+      case 'slow': return { text: `Open Food Facts didn't answer. Try again in a moment. Search ${api.isWeb ? 'in this browser' : 'on this PC'} still works.`, warn: true };
       case 'limited': return { text: `Open Food Facts asked us to slow down. Online search will be ready in ${r.retry_in} s.`, warn: true };
       case 'bad_barcode': return { text: `The barcode ${text.trim()} doesn’t add up, so nothing was sent. Check the digits against the pack.`, warn: true };
-      case 'no_product': return { text: `Open Food Facts doesn’t list barcode ${text.trim()}. Add the food from a photo of its label.`, warn: true };
+      case 'no_product': return {
+        text: api.isWeb
+          ? `Open Food Facts doesn’t list barcode ${text.trim()}. Add the food by hand.`
+          : `Open Food Facts doesn’t list barcode ${text.trim()}. Add the food from a photo of its label.`,
+        warn: true,
+      };
       default: return null;
     }
   }
@@ -364,25 +382,25 @@
       {#if trimmed && barcode && !code}
         <div class="empty">
           <h2>Barcode {trimmed} doesn’t add up</h2>
-          <p>Check the digits against the pack, or add the food from a photo of its label.</p>
-          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd()}>Add a Food from Its Label</button>{/if}
+          <p>Check the digits against the pack, or add the food {api.isWeb ? 'by hand' : 'from a photo of its label'}.</p>
+          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd()}>{api.isWeb ? 'Add a Food' : 'Add a Food from Its Label'}</button>{/if}
         </div>
       {:else if trimmed && barcode}
         <div class="empty">
           <h2>No saved product with barcode {trimmed}</h2>
-          <p>Press Search Online to look it up on Open Food Facts, or add the food from a photo of its label.</p>
-          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(undefined, code ?? undefined)}>Add a Food from Its Label</button>{/if}
+          <p>Press Search Online to look it up on Open Food Facts, or add the food {api.isWeb ? 'by hand' : 'from a photo of its label'}.</p>
+          {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(undefined, code ?? undefined)}>{api.isWeb ? 'Add a Food' : 'Add a Food from Its Label'}</button>{/if}
         </div>
       {:else if trimmed}
         <div class="empty">
           <h2>No foods match “{trimmed}”</h2>
-          <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. Still nothing? Scan its barcode, or add it yourself from its label or by hand.</p>
+          <p>Check the spelling, try a shorter word, or press Search Online for packaged foods. Still nothing? Scan its barcode, or add it yourself {api.isWeb ? 'by hand' : 'from its label or by hand'}.</p>
           {#if onadd}<button type="button" class="add ghost" onclick={() => onadd(trimmed)}>Add “{trimmed}” as a Food</button>{/if}
         </div>
       {:else}
         <div class="empty">
           <h2>Look up any food</h2>
-          <p>Search about 18,000 foods stored on this PC, or add one from its label. Nothing is sent anywhere until you press Search Online.</p>
+          <p>Search about 18,000 foods stored {api.isWeb ? 'in this browser' : 'on this PC'}, or add one {api.isWeb ? 'by hand' : 'from its label'}. Nothing is sent anywhere until you press Search Online.</p>
           {#if onadd}<button type="button" class="add primary" onclick={() => onadd()}>Add a Food</button>{/if}
         </div>
       {/if}
@@ -418,12 +436,24 @@
       class="online scan"
       aria-busy={scanning}
       aria-disabled={scanning}
-      title="Read the barcode from a photo of the pack, on this PC. You can also drop the photo here."
+      title="Read the barcode from a photo of the pack, {api.isWeb ? 'in this browser' : 'on this PC'}. You can also drop the photo here."
       onclick={() => { if (!scanning) barcodeFile?.click(); }}
     >
       <Icon name="photo" size={16} />
       {scanning ? 'Reading…' : 'Scan Barcode…'}
     </button>
+    {#if canCamera}
+      <button
+        type="button"
+        class="online cam"
+        aria-disabled={scanning}
+        title="Scan a barcode with your camera. Frames stay on this device."
+        onclick={() => { if (!scanning) cameraOpen = true; }}
+      >
+        <Icon name="camera" size={16} />
+        Camera
+      </button>
+    {/if}
     <input bind:this={barcodeFile} type="file" accept="image/*" hidden onchange={pickedBarcode} />
     <button
       type="button"
@@ -496,6 +526,22 @@
   {/if}
 </div>
 
+{#if cameraOpen}
+  <BarcodeCamera
+    onclose={() => (cameraOpen = false)}
+    onfound={async (read) => {
+      cameraOpen = false;
+      if (scanning) return;
+      scanning = true;
+      try {
+        await applyScannedCode(read);
+      } finally {
+        scanning = false;
+      }
+    }}
+  />
+{/if}
+
 <style>
   .search { font-size: 14.5px; line-height: 1.45; color: var(--ink); }
   /* a steady height, so the dialog does not jump while typing; the two panes scroll on their own */
@@ -505,19 +551,21 @@
 
   .bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    height: 48px;
+    min-height: 48px;
     margin-top: 4px;
-    padding: 0 8px 0 16px;
+    padding: 7px 8px 7px 14px;
     border-radius: 12px;
     background: var(--card);
     color: var(--ink-3);
     box-shadow: var(--shadow-card), inset 0 0 0 1px var(--rule);
   }
+  .bar > :global(svg) { flex: none; }
   .bar:focus-within { box-shadow: 0 0 0 3px var(--focus), inset 0 0 0 1px var(--accent); }
   /* input.q out-ranks the dialog's own field styles when this search sits inside a sheet */
-  .bar input.q { flex: 1; width: auto; height: 100%; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; background: none; box-shadow: none; color: var(--ink); font: inherit; font-size: 15px; -webkit-user-select: text; user-select: text; }
+  .bar input.q { flex: 1 1 160px; width: auto; height: 34px; min-width: 120px; padding: 0; border: 0; border-radius: 0; outline: none; background: none; box-shadow: none; color: var(--ink); font: inherit; font-size: 15px; -webkit-user-select: text; user-select: text; }
   .bar input.q::placeholder { color: var(--ink-3); }
 
   /* secondary button: the label changes, the width does not, so the bar never shifts */
@@ -544,6 +592,10 @@
   .online.retry { min-width: 0; }
   /* wide enough for "Reading…" and "Scan Barcode…", so the bar never shifts */
   .online.scan { min-width: 148px; }
+  .online.cam { min-width: 0; padding: 0 12px; }
+  @media (max-width: 600px) {
+    .online, .online.scan { min-width: 0; }
+  }
 
   .status { display: flex; align-items: flex-start; gap: 6px; min-height: 20px; margin: 8px 0 12px; padding: 0 4px; }
   .status.warn { color: var(--warn); }

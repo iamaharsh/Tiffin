@@ -1,4 +1,5 @@
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { invoke, isWeb, photoUrl, loadPhotoUrl, storageStatus, requestPersistentStorage, subscribeInstall, triggerInstall, type StorageStatus, type InstallOutcome } from './transport';
+export { isWeb, storageStatus, requestPersistentStorage, subscribeInstall, triggerInstall, type StorageStatus, type InstallOutcome };
 
 export type Category = { path: string; name: string; depth: number; label: number | null; count: number };
 export type Overview = {
@@ -216,6 +217,8 @@ export const onlineFoodDraft = (code: string) => invoke<{ food: MyFood; ready: b
 export const offSearch = (q: string) => invoke<OnlineResult>('off_search', { q });
 /** The code read from a photo of a barcode, or null when none could be read. Offline. */
 export const barcodePhoto = async (file: File) => invoke<string | null>('barcode_photo', new Uint8Array(await file.arrayBuffer()));
+/** The code read from raw image bytes (for example a camera frame), or null when none could be read. Offline. */
+export const barcodeBytes = (bytes: Uint8Array) => invoke<string | null>('barcode_photo', bytes);
 
 // ---- diary ----
 /** Sums for a meal or a day; null is "not reported for some food", never a partial sum. */
@@ -449,7 +452,7 @@ export const isoToDay = (iso: string) => (iso ? Math.round(Date.parse(iso + 'T00
 export const dayLabel = (day: number, opts: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric' }) =>
   new Date(day * 86400000).toLocaleDateString(undefined, { ...opts, timeZone: 'UTC' });
 
-export const photoUrl = (name: string) => convertFileSrc(name, 'photo');
+export { photoUrl, loadPhotoUrl };
 
 /** CSS colour for a label index (null = unlabelled). */
 export const labelVar = (i: number | null) => (i == null ? 'var(--l-none)' : `var(--l${i})`);

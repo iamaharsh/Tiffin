@@ -7,6 +7,56 @@ on:
 
 # Actions are pinned to full commit SHAs (the trailing comment is the version). Let Dependabot or Renovate bump them.
 jobs:
+  # The web version's helper image. It only builds here (nothing is pushed); a failure never holds back the desktop release.
+  helper-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Only the MET stand-in ships
+        run: python3 -I app/tools/build_mets.py --check-release app/data/mets.tsv
+      - name: Helper image builds
+        run: docker build -f helper/Dockerfile -t tiffin-helper .
+
+  # The web version's static bundle, release WASM, CSP/headers, and Caddyfile. Never holds back the desktop release.
+  web-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Only the MET stand-in ships
+        run: python3 -I app/tools/build_mets.py --check-release app/data/mets.tsv
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: wasm32-wasip1
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            desktop/web-wasm -> target
+            app -> target
+      - name: Build release WebAssembly reactor
+        run: cargo build --release --locked --manifest-path desktop/web-wasm/Cargo.toml --target wasm32-wasip1
+      - name: Install front end packages
+        run: npm ci
+        working-directory: desktop
+      - name: Build and verify web bundle, CSP, and deploy configs
+        env:
+          VITE_HELPER_URL: https://helper.tiffin.fyi
+        run: |
+          npm run check
+          npm run build:web
+          npm run check:web
+        working-directory: desktop
+      - name: Validate self-hosted Caddyfile syntax
+        run: docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
   release:
     runs-on: windows-latest
     permissions:
@@ -64,6 +114,28 @@ jobs:
         run: |
           cargo test --manifest-path app/Cargo.toml
           cargo test --manifest-path desktop/src-tauri/Cargo.toml
+          cargo test --manifest-path helper/Cargo.toml
+          cargo test --manifest-path desktop/commands/Cargo.toml --features tauri
+
+      # The web version (Milestone 2) runs the same crate as WebAssembly, without the desktop-only parts.
+      # It targets WASI, so the tests run unchanged under wasmtime with a real folder as /tmp.
+      - name: The portable crate still passes its tests as WebAssembly
+        shell: bash
+        run: |
+          rustup target add wasm32-wasip1
+          # Pinned like the actions above: this exact wasmtime build, or the release stops.
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o wasmtime.zip https://github.com/bytecodealliance/wasmtime/releases/download/v51.0.0/wasmtime-v51.0.0-x86_64-windows.zip
+          echo "d2f5853a1cded9b1256b45cd57686b6855e69049ef07fd4ad78feb78dfa3aada  wasmtime.zip" | sha256sum -c -
+          unzip -q wasmtime.zip
+          mkdir -p wasi-tmp
+          export CARGO_TARGET_WASM32_WASIP1_RUNNER="$(pwd -W)/wasmtime-v51.0.0-x86_64-windows/wasmtime.exe run --dir=$(pwd -W)/wasi-tmp::/tmp"
+          cd "$GITHUB_WORKSPACE"
+          cargo test --manifest-path app/Cargo.toml --lib --no-default-features
+          cargo test --manifest-path app/Cargo.toml --lib --no-default-features --target wasm32-wasip1
+          cargo test --manifest-path desktop/commands/Cargo.toml --lib --target wasm32-wasip1
+          cargo test --manifest-path desktop/web-wasm/Cargo.toml --lib --target wasm32-wasip1
+          cargo build --manifest-path desktop/web-wasm/Cargo.toml --target wasm32-wasip1
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:

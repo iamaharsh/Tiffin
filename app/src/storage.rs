@@ -351,7 +351,12 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], keep_bak: bool) -> Result<
         return Err(e.to_string());
     }
     if keep_bak && path.exists() {
-        let _ = fs::copy(path, path.with_extension("json.bak"));
+        // copied aside, synced, then renamed: a crash mid-copy leaves the old .bak whole, never a cut-off one
+        let bak_tmp = path.with_extension("json.bak.tmp");
+        let copied = fs::copy(path, &bak_tmp).and_then(|_| fs::OpenOptions::new().write(true).open(&bak_tmp)).and_then(|f| f.sync_all());
+        if copied.is_err() || fs::rename(&bak_tmp, path.with_extension("json.bak")).is_err() {
+            let _ = fs::remove_file(&bak_tmp);
+        }
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
@@ -1030,6 +1035,21 @@ mod tests {
     }
 
     #[test]
+    fn the_backup_copy_is_swapped_in_whole() {
+        let dir = crate::scratch_dir().join(format!("rb-bak-{}", crate::test_pid()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("library.json");
+        write_atomic(&path, b"one", true).unwrap();
+        assert!(!path.with_extension("json.bak").exists(), "nothing to keep on the first save");
+        write_atomic(&path, b"two", true).unwrap();
+        write_atomic(&path, b"three", true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"three");
+        assert_eq!(fs::read(path.with_extension("json.bak")).unwrap(), b"two");
+        assert!(!path.with_extension("json.bak.tmp").exists() && !path.with_extension("tmp").exists(), "no temp copies left");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn photo_scale_rule() {
         // fit: longer side to the limit, never enlarged
         assert_eq!(photo_scale(false, 1200, 2400, 1600), (1200, 800, 0.5));
@@ -1041,7 +1061,7 @@ mod tests {
 
     #[test]
     fn photos_shrink_and_survive_backup() {
-        let dir = std::env::temp_dir().join(format!("rb-photo-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("rb-photo-{}", crate::test_pid()));
         let photos = dir.join("photos");
         let name = save_photo_bytes(&test_jpeg(2400, 1600), &photos, "Pad Thai").unwrap();
         let saved = image::open(photos.join(&name)).unwrap();
@@ -1060,7 +1080,7 @@ mod tests {
 
     #[test]
     fn two_backups_in_one_minute_both_survive() {
-        let dir = std::env::temp_dir().join(format!("rb-twobk-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("rb-twobk-{}", crate::test_pid()));
         let _ = fs::remove_dir_all(&dir);
         let mut lib = Library::default();
         lib.add_recipe(Recipe { name: "One".into(), ..Default::default() });
@@ -1226,7 +1246,7 @@ mod tests {
 
     #[test]
     fn backup_round_trip_and_snapshots() {
-        let dir = std::env::temp_dir().join(format!("recipebox-test-{}", now_secs() ^ std::process::id() as u64));
+        let dir = crate::scratch_dir().join(format!("recipebox-test-{}", now_secs() ^ crate::test_pid() as u64));
         let mut lib = crate::model::sample_library(20000);
         let p = backup_to(&lib, &dir).unwrap();
         let b = read_backup(&p).unwrap();
@@ -1247,7 +1267,7 @@ mod tests {
 
     /// A fresh, empty temp folder of its own.
     fn tdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-store-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-store-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

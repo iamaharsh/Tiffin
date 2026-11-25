@@ -13,6 +13,7 @@ use crate::rules::{self, SiteRule};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+#[cfg(any(feature = "native", test))]
 use std::path::Path;
 
 #[derive(Clone, Debug, Default)]
@@ -50,12 +51,17 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const PAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 const PICTURE_MAX_BYTES: usize = 15 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
+/// One download, every hop included: a slow site can't hold a request (or a helper slot) for minutes.
+const DOWNLOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(50);
+/// The most one hop may take.
+const HOP_LIMIT_SECS: u64 = 25;
 
 /// Refusals for links the importer won't open. Full sentences: the UI shows them as they are.
 pub const ONLY_WEB: &str = "Tiffin only imports from web pages (http or https).";
 pub const DASH_LINK: &str = "That link starts with a dash, so it isn't a web address.";
 pub const USER_IN_LINK: &str = "Links with a user name or password in them aren't imported.";
 pub const TOO_MANY_REDIRECTS: &str = "The page redirected more than 5 times, so Tiffin stopped.";
+pub const TOO_SLOW: &str = "The site took too long to answer, so Tiffin stopped.";
 pub const NOT_LOCAL: &str = "Tiffin imports only from web pages on the internet, not from this computer or your home network.";
 const NOT_AN_ADDRESS: &str = "That isn't a web address.";
 const PAGE_TOO_BIG: &str = "The page is larger than 10 MB, so it wasn't imported.";
@@ -145,17 +151,27 @@ fn redirect_target(current: &str, location: &str) -> Result<String, String> {
     check_web_url(next.as_str())
 }
 
-/// This computer or the home network: loopback, private, link-local, shared (100.64/10) and
-/// unspecified addresses, and IPv6 addresses that wrap an IPv4 one.
+/// This computer, the home network, or no website at all: loopback, private, link-local, shared
+/// (100.64/10), unspecified, special-purpose (192.0.0/24, which holds some clouds' metadata
+/// address), benchmarking (198.18/15), documentation, multicast and reserved addresses, and IPv6
+/// addresses that wrap a local IPv4 one (mapped, compatible, NAT64 64:ff9b::/96, 6to4 2002::/16).
 fn is_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(a) => {
             let o = a.octets();
-            a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.is_broadcast() || o[0] == 0 || (o[0] == 100 && o[1] & 0xc0 == 64)
+            a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.is_broadcast() || a.is_documentation() || a.is_multicast()
+                || o[0] == 0 || o[0] >= 240 || (o[0] == 100 && o[1] & 0xc0 == 64) || (o[0] == 192 && o[1] == 0 && o[2] == 0) || (o[0] == 198 && o[1] & 0xfe == 18)
         }
         IpAddr::V6(a) => {
-            let first = a.segments()[0];
-            a.is_loopback() || a.is_unspecified() || first & 0xffc0 == 0xfe80 || first & 0xfe00 == 0xfc00 || a.to_ipv4().is_some_and(|v| is_local(IpAddr::V4(v)))
+            let s = a.segments();
+            let wrapped = |hi: u16, lo: u16| is_local(IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            a.is_loopback() || a.is_unspecified() || a.is_multicast() || s[0] & 0xffc0 == 0xfe80 || s[0] & 0xfe00 == 0xfc00
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo: hides an IPv4 address, never a website's own
+                || (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] && wrapped(s[6], s[7]))
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // NAT64 for a network's own use (64:ff9b:1::/48)
+                || (s[0] == 0x2002 && wrapped(s[1], s[2]))
+                || a.to_ipv4().is_some_and(|v| is_local(IpAddr::V4(v)))
         }
     }
 }
@@ -181,9 +197,15 @@ fn too_big(page: bool) -> &'static str {
 }
 
 /// A name part that two calls never share (process id plus a nanosecond stamp).
+#[cfg(any(feature = "native", test))]
 pub(crate) fn unique_stamp() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("{}-{}", std::process::id(), nanos)
+    // WASI has no process ids (std panics); there the nanosecond stamp alone tells calls apart.
+    #[cfg(target_os = "wasi")]
+    let pid = 0;
+    #[cfg(not(target_os = "wasi"))]
+    let pid = std::process::id();
+    format!("{}-{}", pid, nanos)
 }
 
 /// The only download path (pages and pictures): checks the link, then follows redirects one hop
@@ -191,13 +213,20 @@ pub(crate) fn unique_stamp() -> String {
 /// some sites accept when they refuse other clients.
 fn download(url: &str, max: usize, page: bool) -> Result<Vec<u8>, String> {
     let mut url = check_web_url(url)?;
+    let deadline = std::time::Instant::now() + DOWNLOAD_LIMIT;
     for _ in 0..=MAX_REDIRECTS {
         let (host, port) = host_port(&url)?;
+        // shortcut: the system name lookup has no time limit in std; a hung resolver can still outlast DOWNLOAD_LIMIT.
         let addr = vet_host(&host, port)?;
-        let hop = match ureq_hop(&url, max, page, addr) {
+        let secs = hop_time(deadline).ok_or(if page { TOO_SLOW } else { PICTURE_FAILED })?;
+        let hop = match ureq_hop(&url, max, page, addr, secs) {
             Ok(h) => h,
             Err(e) if e == too_big(page) => return Err(e),
-            Err(first) => curl_hop(&url, max, page, &host, port, addr.ip()).map_err(|_| if page { first } else { PICTURE_FAILED.to_string() })?,
+            Err(first) => {
+                // out of time for a second try: the first try's reason is the one to show
+                let Some(secs) = hop_time(deadline) else { return Err(if page { first } else { PICTURE_FAILED.to_string() }) };
+                curl_hop(&url, max, page, &host, port, addr.ip(), secs).map_err(|_| if page { first } else { PICTURE_FAILED.to_string() })?
+            }
         };
         match hop {
             Hop::Body(b) => return Ok(b),
@@ -207,6 +236,12 @@ fn download(url: &str, max: usize, page: bool) -> Result<Vec<u8>, String> {
     Err(TOO_MANY_REDIRECTS.into())
 }
 
+/// Seconds the next hop may take: what is left of the download's time, at most HOP_LIMIT_SECS; None once it's used up.
+fn hop_time(deadline: std::time::Instant) -> Option<u64> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    (!left.is_zero()).then(|| left.as_secs_f64().ceil().min(HOP_LIMIT_SECS as f64) as u64)
+}
+
 fn host_port(url: &str) -> Result<(String, u16), String> {
     let req = ureq::get(url);
     let parsed = req.request_url().map_err(|_| NOT_AN_ADDRESS.to_string())?;
@@ -214,12 +249,21 @@ fn host_port(url: &str) -> Result<(String, u16), String> {
     Ok((u.host_str().unwrap_or_default().to_string(), u.port_or_known_default().unwrap_or(80)))
 }
 
-fn ureq_hop(url: &str, max: usize, page: bool, addr: SocketAddr) -> Result<Hop, String> {
+/// A client that can open https links: the system TLS stack on desktop. The browser build has
+/// none, so there it fails and the web shell fetches through its helper instead.
+pub(crate) fn secure_agent() -> Result<ureq::AgentBuilder, String> {
+    #[cfg(feature = "native")]
+    return native_tls::TlsConnector::new().map(|tls| ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls))).map_err(|e| e.to_string());
+    #[cfg(not(feature = "native"))]
+    Err("This build can't open secure connections.".into())
+}
+
+fn ureq_hop(url: &str, max: usize, page: bool, addr: SocketAddr, secs: u64) -> Result<Hop, String> {
     use std::io::Read;
-    let tls = native_tls::TlsConnector::new().map_err(|e| format!("Secure connection unavailable: {}", e))?;
+    let builder = secure_agent().map_err(|e| format!("Secure connection unavailable: {}", e))?;
     // redirects(0): a 3xx comes back as an answer, and download() checks where it leads.
     // The resolver hands back only the address vet_host checked, so ureq never looks the name up again.
-    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(std::time::Duration::from_secs(25)).redirects(0).resolver(move |_: &str| Ok(vec![addr])).build();
+    let agent = builder.timeout(std::time::Duration::from_secs(secs)).redirects(0).resolver(move |_: &str| Ok(vec![addr])).build();
     // A standard browser identity: several big recipe sites refuse requests that name an app.
     let mut req = agent.get(url).set("User-Agent", BROWSER_UA);
     if page {
@@ -249,8 +293,9 @@ fn ureq_hop(url: &str, max: usize, page: bool, addr: SocketAddr) -> Result<Hop, 
 /// Arguments for one curl hop. The link comes last, after "--", so it can never be read as an
 /// option; "-q" first ignores the user's curlrc; only http(s), and curl never follows a redirect
 /// itself (download() does, and checks each one).
-fn curl_args(url: &str, max: usize, page: bool, out: &Path, host: &str, port: u16, ip: IpAddr) -> Vec<String> {
-    let mut a: Vec<String> = ["-q", "-sS", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-redirs", "0", "--max-time", "25", "--max-filesize"]
+#[cfg(any(feature = "native", test))]
+fn curl_args(url: &str, max: usize, page: bool, out: &Path, host: &str, port: u16, ip: IpAddr, secs: u64) -> Vec<String> {
+    let mut a: Vec<String> = ["-q", "-sS", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-redirs", "0", "--max-time", &secs.to_string(), "--max-filesize"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -268,21 +313,29 @@ fn curl_args(url: &str, max: usize, page: bool, out: &Path, host: &str, port: u1
     a
 }
 
-fn curl_hop(url: &str, max: usize, page: bool, host: &str, port: u16, ip: IpAddr) -> Result<Hop, String> {
+/// The browser build can't start programs, so there is no second try: the first error stands.
+#[cfg(not(feature = "native"))]
+fn curl_hop(_url: &str, _max: usize, _page: bool, _host: &str, _port: u16, _ip: IpAddr, _secs: u64) -> Result<Hop, String> {
+    Err("No curl in this build.".into())
+}
+
+#[cfg(feature = "native")]
+fn curl_hop(url: &str, max: usize, page: bool, host: &str, port: u16, ip: IpAddr, secs: u64) -> Result<Hop, String> {
     let out = std::env::temp_dir().join(format!("recipebox-download-{}.tmp", unique_stamp()));
-    let res = run_curl(url, max, page, &out, host, port, ip);
+    let res = run_curl(url, max, page, &out, host, port, ip, secs);
     let _ = std::fs::remove_file(&out);
     res
 }
 
-fn run_curl(url: &str, max: usize, page: bool, out: &Path, host: &str, port: u16, ip: IpAddr) -> Result<Hop, String> {
+#[cfg(feature = "native")]
+fn run_curl(url: &str, max: usize, page: bool, out: &Path, host: &str, port: u16, ip: IpAddr, secs: u64) -> Result<Hop, String> {
     // Windows ships curl in System32; prefer it over whatever else is on the PATH.
     let system = std::env::var_os("SystemRoot").map(|r| Path::new(&r).join("System32").join("curl.exe")).filter(|p| p.is_file());
     let mut cmd = match system {
         Some(p) => std::process::Command::new(p),
         None => std::process::Command::new("curl"),
     };
-    cmd.args(curl_args(url, max, page, out, host, port, ip));
+    cmd.args(curl_args(url, max, page, out, host, port, ip, secs));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1466,12 +1519,22 @@ and bake.".into(), ..Default::default() };
     }
 
     #[test]
+    fn a_download_shares_one_clock_across_its_hops() {
+        let now = std::time::Instant::now();
+        assert_eq!(hop_time(now + std::time::Duration::from_secs(100)), Some(HOP_LIMIT_SECS));
+        assert_eq!(hop_time(now + std::time::Duration::from_secs(10)), Some(10));
+        assert_eq!(hop_time(now + std::time::Duration::from_millis(300)), Some(1)); // a moment left still gets a try
+        assert_eq!(hop_time(now), None);
+        assert!(DOWNLOAD_LIMIT.as_secs() < 60, "inside the web helper's own limit");
+    }
+
+    #[test]
     fn curl_reads_the_link_as_a_link() {
         let url = "https://example.com/--config";
         let ip: IpAddr = "93.184.216.34".parse().unwrap();
-        let a = curl_args(url, PAGE_MAX_BYTES, true, Path::new("out.tmp"), "example.com", 443, ip);
+        let a = curl_args(url, PAGE_MAX_BYTES, true, Path::new("out.tmp"), "example.com", 443, ip, 25);
         assert_eq!(a[0], "-q");
-        for (k, v) in [("--proto", "=http,https"), ("--proto-redir", "=http,https"), ("--max-redirs", "0")] {
+        for (k, v) in [("--proto", "=http,https"), ("--proto-redir", "=http,https"), ("--max-redirs", "0"), ("--max-time", "25")] {
             assert!(a.windows(2).any(|w| w[0] == k && w[1] == v), "{k} {v}");
         }
         assert_eq!(a[a.len() - 2], "--");
@@ -1481,10 +1544,11 @@ and bake.".into(), ..Default::default() };
         let pin = a.iter().position(|s| s == "--resolve").expect("--resolve");
         assert_eq!(a[pin + 1], "example.com:443:93.184.216.34");
         assert!(pin < a.len() - 2);
-        let lit = curl_args("http://93.184.216.34/x", PICTURE_MAX_BYTES, false, Path::new("out.tmp"), "93.184.216.34", 80, ip);
+        let lit = curl_args("http://93.184.216.34/x", PICTURE_MAX_BYTES, false, Path::new("out.tmp"), "93.184.216.34", 80, ip, 7);
         assert!(!lit.iter().any(|s| s == "--resolve"));
+        assert!(lit.windows(2).any(|w| w[0] == "--max-time" && w[1] == "7")); // the time left, not always 25
         let six: IpAddr = "2001:4860:4860::8888".parse().unwrap();
-        let a6 = curl_args(url, PAGE_MAX_BYTES, true, Path::new("out.tmp"), "example.com", 443, six);
+        let a6 = curl_args(url, PAGE_MAX_BYTES, true, Path::new("out.tmp"), "example.com", 443, six, 25);
         assert!(a6.iter().any(|s| s == "example.com:443:[2001:4860:4860::8888]"));
     }
 
@@ -1493,14 +1557,20 @@ and bake.".into(), ..Default::default() };
         for ip in [
             "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "0.0.0.0", "255.255.255.255", "::1", "::", "fe80::1", "fc00::1",
             "fd12:3456::1", "::ffff:127.0.0.1", "::ffff:192.168.0.1",
+            "192.0.0.192", "198.18.0.1", "198.19.255.255", "224.0.0.1", "239.255.255.250", "240.0.0.1", "192.0.2.1", "203.0.113.5",
+            "ff02::1", "2001:db8::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "2002:c0a8:101::1", "2002:7f00:1::", "2002::1", "64:ff9b:1::808:808", "198.51.100.7",
         ] {
             assert!(is_local(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["8.8.8.8", "172.32.0.1", "93.184.216.34", "2001:4860:4860::8888"] {
+        // a NAT64 or 6to4 address of a real website is fine: IPv6-only networks reach every IPv4 site that way
+        for ip in ["8.8.8.8", "172.32.0.1", "93.184.216.34", "2001:4860:4860::8888", "192.0.1.1", "198.17.255.255", "198.20.0.1", "223.255.255.255", "64:ff9b::808:808", "2002:808:808::1", "2606:4700::1111"] {
             assert!(!is_local(ip.parse().unwrap()), "{ip}");
         }
         // refused before any connection, by literal address, by name, in both entry points
         for link in ["http://localhost/", "http://127.0.0.1:1/", "http://[::1]/", "http://2130706433/"] {
+            if cfg!(target_os = "wasi") && link.contains("localhost") {
+                continue; // WASI has no name lookup: "localhost" fails closed as a site not found
+            }
             assert_eq!(fetch(link), Err(NOT_LOCAL.to_string()), "{link}");
         }
         assert_eq!(fetch_bytes("http://192.168.1.1/a.jpg"), Err(NOT_LOCAL.to_string()));

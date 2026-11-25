@@ -44,8 +44,10 @@ pub fn query_ready(q: &str) -> bool {
     q.trim().chars().count() >= OFF_MIN_LETTERS
 }
 
-/// What came back from one online search.
-#[derive(Debug, Clone, PartialEq)]
+/// What came back from one online search. Serialized, it is also what tiffin-helper's /off sends
+/// the web app: `{"answer":"found","value":[…]}`, `{"answer":"limited","value":60}`, `{"answer":"slow"}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "answer", content = "value", rename_all = "snake_case")]
 pub enum OffAnswer {
     Found(Vec<OnlineFood>),
     Empty,
@@ -76,6 +78,7 @@ fn search_at(url: &str, text: &str, email: &str) -> OffAnswer {
 }
 
 const FIELDS: &str = "code,product_name,brands,serving_size,serving_quantity,nutriments";
+pub const OFF_PRODUCT_FIELDS: &str = FIELDS;
 pub const OFF_PRODUCT_URL: &str = "https://world.openfoodfacts.org/api/v2/product";
 
 /// What the lookup says about a barcode whose check digit doesn't fit (so nothing was sent).
@@ -88,17 +91,11 @@ pub fn product(code: &str, email: &str) -> Result<OffAnswer, String> {
     product_at(OFF_PRODUCT_URL, code, email)
 }
 
-fn product_at(base: &str, code: &str, email: &str) -> Result<OffAnswer, String> {
+/// Turn one Open Food Facts v2 product JSON response into an [`OffAnswer`]. Shared by desktop `product()` and the web shell.
+pub fn parse_product(code: &str, mut v: Value) -> OffAnswer {
     let code = code.trim();
-    if !gtin_ok(code) {
-        return Err(BAD_BARCODE.into());
-    }
-    let mut v = match get_json(&format!("{base}/{code}.json"), email, &[("fields", FIELDS)]) {
-        Ok(v) => v,
-        Err(answer) => return Ok(answer),
-    };
     if v.get("status").and_then(Value::as_i64) == Some(0) || !v["product"].is_object() {
-        return Ok(OffAnswer::Empty);
+        return OffAnswer::Empty;
     }
     let p = &mut v["product"];
     p["code"] = Value::from(code);
@@ -106,7 +103,19 @@ fn product_at(base: &str, code: &str, email: &str) -> Result<OffAnswer, String> 
     if p.get("product_name").and_then(Value::as_str).is_none_or(|n| n.trim().is_empty()) {
         p["product_name"] = Value::from(format!("Barcode {code}"));
     }
-    Ok(found_or_empty(parse_hits(&serde_json::json!({ "hits": [p.take()] }))))
+    found_or_empty(parse_hits(&serde_json::json!({ "hits": [p.take()] })))
+}
+
+fn product_at(base: &str, code: &str, email: &str) -> Result<OffAnswer, String> {
+    let code = code.trim();
+    if !gtin_ok(code) {
+        return Err(BAD_BARCODE.into());
+    }
+    let v = match get_json(&format!("{base}/{code}.json"), email, &[("fields", FIELDS)]) {
+        Ok(v) => v,
+        Err(answer) => return Ok(answer),
+    };
+    Ok(parse_product(code, v))
 }
 
 fn found_or_empty(hits: Vec<OnlineFood>) -> OffAnswer {
@@ -121,8 +130,7 @@ fn found_or_empty(hits: Vec<OnlineFood>) -> OffAnswer {
 /// Every way it can go wrong is an answer: not there (404), offline, slow, or told to wait.
 fn get_json(url: &str, email: &str, query: &[(&str, &str)]) -> Result<Value, OffAnswer> {
     let agent_name = user_agent(email).ok_or(OffAnswer::NeedsEmail)?;
-    let tls = native_tls::TlsConnector::new().map_err(|_| OffAnswer::Slow)?;
-    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(Duration::from_secs(8)).redirects(0).build();
+    let agent = crate::importer::secure_agent().map_err(|_| OffAnswer::Slow)?.timeout(Duration::from_secs(8)).redirects(0).build();
     let mut req = agent.get(url).set("User-Agent", &agent_name);
     for (k, v) in query {
         req = req.query(k, v);
@@ -403,6 +411,7 @@ mod tests {
 
     /// PRIV-02: an online search carries the typed text, the fixed search fields and the contact User-Agent, and nothing else.
     #[test]
+    #[cfg(feature = "native")] // talks to a local server through the real client
     fn a_search_sends_only_the_text_and_the_contact() {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -431,6 +440,7 @@ mod tests {
     }
 
     /// A one-request HTTP server on this machine: answers `reply` and hands back the request lines it received.
+    #[cfg(feature = "native")]
     fn serve(reply: String) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -452,12 +462,14 @@ mod tests {
         (base, server)
     }
 
+    #[cfg(feature = "native")]
     fn http(status: &str, body: &str) -> String {
         format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}", body.len())
     }
 
     /// PRIV-02: a barcode lookup carries the code, the fixed fields and the contact User-Agent, and nothing else.
     #[test]
+    #[cfg(feature = "native")] // talks to a local server through the real client
     fn a_barcode_lookup_sends_only_the_code_and_the_contact() {
         let body = json!({"status": 1, "product": {"product_name": "Extra Firm Tofu", "brands": "Sunrise", "serving_size": "85 g", "serving_quantity": 85,
             "nutriments": {"energy-kcal_100g": 141, "proteins_100g": 15.3, "fat_100g": 8.2, "carbohydrates_100g": 2.4, "sodium_100g": 0.012}}}).to_string();
@@ -477,6 +489,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")] // talks to a local server through the real client
     fn barcode_answers_for_every_outcome() {
         // impossible values come back flagged, and a nameless product still comes back for its barcode
         let body = json!({"status": 1, "product": {"nutriments": {"energy-kcal_100g": 50, "proteins_100g": 130}}}).to_string();
@@ -515,6 +528,18 @@ mod tests {
         assert_eq!(product_at("http://127.0.0.1:9/p", "../../search?q=x", "me@example.com"), Err(BAD_BARCODE.to_string()));
         assert_eq!(product_at("http://127.0.0.1:9/p", "4006381333931", ""), Ok(OffAnswer::NeedsEmail));
         assert_eq!(product_at("http://127.0.0.1:9/p", "4006381333931", "me@example.com"), Ok(OffAnswer::Offline));
+    }
+
+    #[test]
+    fn an_answer_crosses_the_wire_unchanged() {
+        let food = OnlineFood { code: "3017620422003".into(), name: "Nutella".into(), ..Default::default() };
+        for a in [OffAnswer::Found(vec![food]), OffAnswer::Empty, OffAnswer::Offline, OffAnswer::Slow, OffAnswer::Limited(60), OffAnswer::NeedsEmail] {
+            let wire = serde_json::to_string(&a).unwrap();
+            assert_eq!(serde_json::from_str::<OffAnswer>(&wire).unwrap(), a, "{wire}");
+        }
+        // the shape the web app reads
+        assert_eq!(serde_json::to_string(&OffAnswer::Limited(60)).unwrap(), r#"{"answer":"limited","value":60}"#);
+        assert_eq!(serde_json::to_string(&OffAnswer::NeedsEmail).unwrap(), r#"{"answer":"needs_email"}"#);
     }
 
     #[test]
@@ -635,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")] // talks to a local server through the real client
     fn unreachable_service_reads_as_offline() {
         // nothing listens on port 9 of this machine: no real network is touched
         assert_eq!(search_at("http://127.0.0.1:9/search", "yogurt", "me@example.com"), OffAnswer::Offline);
@@ -666,7 +692,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-off-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-off-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         d.join("cache").join("off-products.json")
     }
@@ -723,5 +749,26 @@ mod tests {
         let mut odd = product("2", "Odd");
         odd.suspect = true;
         assert!(!as_my_food(&odd).1);
+    }
+
+    #[test]
+    fn parse_product_handles_missing_unnamed_and_valid_responses() {
+        assert_eq!(parse_product("4006381333931", json!({ "status": 0 })), OffAnswer::Empty);
+        assert_eq!(parse_product("4006381333931", json!({ "status": 1 })), OffAnswer::Empty);
+        let OffAnswer::Found(unnamed) = parse_product("4006381333931", json!({ "status": 1, "product": { "product_name": "  " } })) else {
+            panic!("expected Found for unnamed product");
+        };
+        assert_eq!(unnamed.len(), 1);
+        assert_eq!(unnamed[0].code, "4006381333931");
+        assert_eq!(unnamed[0].name, "Barcode 4006381333931");
+        let OffAnswer::Found(named) = parse_product(
+            " 4006381333931 ",
+            json!({ "status": 1, "product": { "product_name": "Oat Milk", "brands": "Oatly", "nutriments": { "energy-kcal_100g": 45 } } }),
+        ) else {
+            panic!("expected Found for named product");
+        };
+        assert_eq!(named[0].name, "Oat Milk");
+        assert_eq!(named[0].brands, "Oatly");
+        assert_eq!(named[0].per100.calories, Some(45.0));
     }
 }

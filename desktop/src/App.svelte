@@ -29,6 +29,7 @@
   import MenusPage from './lib/MenusPage.svelte';
   import SettingsPage from './lib/SettingsPage.svelte';
   import UpdateBanner from './lib/UpdateBanner.svelte';
+  import BackupBanner from './lib/BackupBanner.svelte';
   import { update, checkForUpdate, holdsUnsaved } from './lib/updates.svelte';
   import * as api from './lib/api';
   import type { Card, Detail, Draft, Overview, Review, Section } from './lib/api';
@@ -40,7 +41,8 @@
   let ov: Overview | null = $state(null);
   let section: Section = $state('home');
   /** which Settings tab opens (another page can ask for one) */
-  let settingsTab: 'sync' | 'backup' | 'history' | 'trackers' | 'claude' | 'about' = $state('sync');
+  let settingsTab: 'sync' | 'backup' | 'history' | 'trackers' | 'online' | 'claude' | 'appearance' | 'about' = $state(api.isWeb ? 'backup' : 'sync');
+  let backupBanner: { refreshStatus: () => Promise<void> } | undefined = $state();
   let view = $state('all');
   let search = $state('');
   let sort = $state(Number(remembered('sort') ?? -1));
@@ -284,6 +286,7 @@
     }
   }
   $effect(() => {
+    if (api.isWeb) return;
     const t = window.setInterval(pollInbox, 3000);
     return () => clearInterval(t);
   });
@@ -304,6 +307,7 @@
     }
   }
   $effect(() => {
+    if (api.isWeb) return;
     autoSync();
     const t = window.setInterval(autoSync, 5 * 60_000);
     return () => clearInterval(t);
@@ -311,6 +315,7 @@
 
   // A quiet update check 5 s after launch; a failure shows nothing and the next launch tries again.
   $effect(() => {
+    if (api.isWeb) return;
     const t = setTimeout(() => checkForUpdate(false), 5000);
     return () => clearTimeout(t);
   });
@@ -320,6 +325,7 @@
   holdsUnsaved(targetsDirty);
   // Rust enforces it where the install runs; this also runs on mount, so a reload clears a stale value.
   $effect(() => {
+    if (api.isWeb) return;
     api.setUnsaved(update.unsaved).catch((e) => fail(String(e)));
   });
 
@@ -434,7 +440,17 @@
   />
 
   <main bind:this={scroller} onscroll={() => (scrolled = scroller.scrollTop > 4)}>
-    <UpdateBanner />
+    {#if api.isWeb}
+      <BackupBanner
+        bind:this={backupBanner}
+        hidden={section === 'settings' && settingsTab === 'backup'}
+        onerror={fail}
+        onnote={note}
+        onopenbackup={() => { if (!busyEditing()) { parkReview(); planFor = null; settingsTab = 'backup'; section = 'settings'; scroller.scrollTop = 0; } }}
+      />
+    {:else}
+      <UpdateBanner />
+    {/if}
     {#if editing}
       <div class="content">
         {#key editing}
@@ -486,7 +502,7 @@
         onnote={note}
       />
     {:else if section === 'settings'}
-      <SettingsPage bind:tab={settingsTab} onchanged={refresh} onerror={fail} onnote={note} />
+      <SettingsPage bind:tab={settingsTab} onchanged={refresh} onbackup={() => backupBanner?.refreshStatus()} onerror={fail} onnote={note} />
     {:else if section === 'menus' && ov}
       <MenusPage today={ov.today} onopen={openById} onerror={fail} onnote={note} />
     {:else if section === 'pantry'}
@@ -581,7 +597,7 @@
   {@const c = confirmDelete}
   <Dialog title="Delete Forever?" onclose={() => (confirmDelete = null)}>
     <p style="margin:0;color:var(--ink)">Delete {c.what} for good?</p>
-    <p class="fine">They’ll be removed from every synced device. If you change your mind, Version History in Settings can still roll back.</p>
+    <p class="fine">{api.isWeb ? '' : 'They’ll be removed from every synced device. '}If you change your mind, Version History in Settings can still roll back.</p>
     {#snippet actions()}
       <button class="btn" onclick={() => (confirmDelete = null)}>Cancel</button>
       <button class="btn danger" onclick={() => deleteForever(c.ids)}>Delete Forever</button>

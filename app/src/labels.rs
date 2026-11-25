@@ -229,49 +229,71 @@ fn off_barcode_from_url(url: &str) -> Option<String> {
     if is_barcode(&code) { Some(code) } else { None }
 }
 
-/// Look up a link or a barcode number. Runs on a background thread (network). A barcode (or Open Food Facts link) needs the
-/// person's contact `email`; without a valid one nothing is sent and the error is `foods::off::NEEDS_EMAIL`.
-pub fn lookup(input: &str, email: &str) -> Result<LabelGuess, String> {
+/// What a typed value in the My Food lookup box resolves to before any network call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LookupTarget {
+    Barcode(String),
+    Url(String),
+}
+
+pub const OFF_LABEL_FIELDS: &str = "product_name,brands,serving_size,serving_quantity,nutriments";
+pub const BARCODE_NOT_FOUND: &str = "That barcode isn't in Open Food Facts. Try a photo of the label.";
+pub const NO_NUTRITION_ON_PAGE: &str = "No nutrition facts found on that page. Try a photo of the label, or the barcode number.";
+
+/// Classify what was typed in the My Food lookup box: a barcode (or Open Food Facts product link)
+/// or a validated web product link.
+pub fn classify_lookup(input: &str) -> Result<LookupTarget, String> {
     let s = input.trim();
     if s.is_empty() {
         return Err("Paste a product link or type the barcode number.".into());
     }
     if let Some(code) = if is_barcode(s) { Some(s.to_string()) } else { off_barcode_from_url(s) } {
-        return open_food_facts(&code, email);
+        return Ok(LookupTarget::Barcode(code));
     }
     if !(s.starts_with("http://") || s.starts_with("https://") || s.contains('.')) {
         return Err("That doesn't look like a link or a barcode (8–14 digits).".into());
     }
-    let html = crate::importer::fetch(s)?;
-    from_html(&html, s).ok_or_else(|| {
-        "No nutrition facts found on that page. Try a photo of the label, or the barcode number.".to_string()
-    })
+    let url = crate::importer::check_web_url(s)?;
+    Ok(LookupTarget::Url(url))
+}
+
+/// Look up a link or a barcode number. Runs on a background thread (network). A barcode (or Open Food Facts link) needs the
+/// person's contact `email`; without a valid one nothing is sent and the error is `foods::off::NEEDS_EMAIL`.
+pub fn lookup(input: &str, email: &str) -> Result<LabelGuess, String> {
+    match classify_lookup(input)? {
+        LookupTarget::Barcode(code) => open_food_facts(&code, email),
+        LookupTarget::Url(url) => {
+            let html = crate::importer::fetch(&url)?;
+            from_html(&html, &url).ok_or_else(|| NO_NUTRITION_ON_PAGE.to_string())
+        }
+    }
+}
+
+/// Parse the JSON body of an Open Food Facts v2 product lookup into a [`LabelGuess`].
+pub fn parse_off_product_response(body: &str, code: &str) -> Result<LabelGuess, String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    if v.get("status").and_then(|s| s.as_i64()) == Some(0) {
+        return Err(BARCODE_NOT_FOUND.into());
+    }
+    off_product(&v["product"], code).ok_or_else(|| "Open Food Facts has this product but no nutrition facts for it. Try a photo of the label.".into())
 }
 
 fn open_food_facts(code: &str, email: &str) -> Result<LabelGuess, String> {
     let agent_name = crate::foods::off::user_agent(email).ok_or_else(|| crate::foods::off::NEEDS_EMAIL.to_string())?;
-    let url = format!(
-        "https://world.openfoodfacts.org/api/v2/product/{}.json?fields=product_name,brands,serving_size,serving_quantity,nutriments",
-        code
-    );
-    let tls = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
-    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(std::time::Duration::from_secs(20)).build();
+    let url = format!("{}/{}.json?fields={}", crate::foods::off::OFF_PRODUCT_URL, code, OFF_LABEL_FIELDS);
+    let agent = crate::importer::secure_agent()?.timeout(std::time::Duration::from_secs(20)).build();
     let text = agent
         .get(&url)
         // Open Food Facts asks apps to name themselves
         .set("User-Agent", &agent_name)
         .call()
         .map_err(|e| match e {
-            ureq::Error::Status(404, _) => "That barcode isn't in Open Food Facts. Try a photo of the label.".to_string(),
+            ureq::Error::Status(404, _) => BARCODE_NOT_FOUND.to_string(),
             other => format!("Couldn't reach Open Food Facts: {}", other),
         })?
         .into_string()
         .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    if v.get("status").and_then(|s| s.as_i64()) == Some(0) {
-        return Err("That barcode isn't in Open Food Facts. Try a photo of the label.".into());
-    }
-    off_product(&v["product"], code).ok_or_else(|| "Open Food Facts has this product but no nutrition facts for it. Try a photo of the label.".into())
+    parse_off_product_response(&text, code)
 }
 
 fn off_product(p: &serde_json::Value, code: &str) -> Option<LabelGuess> {
@@ -392,11 +414,20 @@ pub fn read_photo(path: &std::path::Path) -> Result<String, String> {
 /// The picture turned the way the camera held it: phones save the pixels sideways plus an EXIF
 /// orientation tag, and text recognition reads sideways text as nonsense.
 fn open_upright(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("Couldn't open the picture: {}", e))?;
+    open_upright_from_reader(std::io::BufReader::new(f))
+}
+
+fn open_upright_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    open_upright_from_reader(std::io::Cursor::new(bytes))
+}
+
+fn open_upright_from_reader<R: std::io::BufRead + std::io::Seek>(reader: R) -> Result<image::DynamicImage, String> {
     use image::ImageDecoder;
     let bad = |e: image::ImageError| format!("Couldn't open the picture: {}", e);
-    // by content, not file extension (pictures can arrive as extensionless temp files)
-    let mut decoder = image::ImageReader::open(path)
-        .and_then(|r| r.with_guessed_format())
+    // by content, not file extension (pictures can arrive as extensionless temp files or raw uploads)
+    let mut decoder = image::ImageReader::new(reader)
+        .with_guessed_format()
         .map_err(|e| format!("Couldn't open the picture: {}", e))?
         .into_decoder()
         .map_err(bad)?;
@@ -408,6 +439,7 @@ fn open_upright(path: &std::path::Path) -> Result<image::DynamicImage, String> {
     Ok(img)
 }
 
+#[cfg(feature = "native")]
 fn ocr_image(img: &image::DynamicImage) -> Result<String, String> {
     // Windows reads pictures up to about 2600 px; phone photos are bigger, so shrink a copy.
     let small;
@@ -419,8 +451,15 @@ fn ocr_image(img: &image::DynamicImage) -> Result<String, String> {
     text
 }
 
+/// The browser build has no Windows text recognition (yet), so a label photo is typed in by hand.
+#[cfg(not(feature = "native"))]
+fn ocr_image(_img: &image::DynamicImage) -> Result<String, String> {
+    Err("Reading a label photo isn't available here yet. Type the numbers from the label instead.".into())
+}
+
 /// Windows text recognition. The picture's path travels in an environment variable, so no file or
 /// folder name can ever become PowerShell script text.
+#[cfg(feature = "native")]
 const OCR_SCRIPT: &str = r#"
 $path = $env:RECIPEBOX_OCR_IMAGE
 $ErrorActionPreference = 'Stop'
@@ -443,6 +482,7 @@ foreach ($l in $result.Lines) { [Console]::Out.WriteLine($l.Text) }
 } catch { [Console]::Error.WriteLine($_.Exception.GetBaseException().Message); exit 1 }
 "#;
 
+#[cfg(feature = "native")]
 fn ocr_command(png: &std::path::Path) -> std::process::Command {
     use base64::Engine;
     // -EncodedCommand takes the script as base64 of UTF-16LE: no script file, no execution-policy override.
@@ -459,6 +499,7 @@ fn ocr_command(png: &std::path::Path) -> std::process::Command {
     cmd
 }
 
+#[cfg(feature = "native")]
 fn ocr_png(png: &std::path::Path) -> Result<String, String> {
     let out = ocr_command(png).output().map_err(|e| format!("Couldn't start Windows text recognition: {}", e))?;
     if !out.status.success() {
@@ -469,10 +510,20 @@ fn ocr_png(png: &std::path::Path) -> Result<String, String> {
 
 /// Photo of a nutrition label → numbers.
 pub fn from_photo(path: &std::path::Path) -> Result<LabelGuess, String> {
-    let mut g = read_either_way_up(&open_upright(path)?, ocr_image)?.ok_or_else(|| {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    from_photo_image(&open_upright(path)?, &name)
+}
+
+/// Raw picture bytes of a nutrition label → numbers (no temp file; used by the web shell).
+pub fn from_photo_bytes(bytes: &[u8], name: &str) -> Result<LabelGuess, String> {
+    from_photo_image(&open_upright_bytes(bytes)?, name)
+}
+
+fn from_photo_image(img: &image::DynamicImage, name: &str) -> Result<LabelGuess, String> {
+    let mut g = read_either_way_up(img, ocr_image)?.ok_or_else(|| {
         "Couldn't find the nutrition numbers in that photo. Try a sharper, straight-on photo of just the Nutrition Facts panel.".to_string()
     })?;
-    g.source = format!("Photo of the label ({})", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    g.source = format!("Photo of the label ({})", name);
     Ok(g)
 }
 
@@ -494,7 +545,17 @@ fn read_either_way_up(img: &image::DynamicImage, ocr: impl Fn(&image::DynamicIma
 /// slightly blurry photo. Every code passes its check digit; UPC-E comes back as the UPC-A it stands for.
 pub fn barcode_from_photo(path: &std::path::Path) -> Result<Option<String>, String> {
     let img = open_upright(path)?;
-    Ok(agreed(&img, decode_retail).or_else(|| ocr_image(&img).ok().and_then(|t| code_from_digits(&t))))
+    Ok(barcode_from_image(&img))
+}
+
+/// Raw picture bytes of a barcode → the product number, or `None` when none can be read (no temp file; used by the web shell).
+pub fn barcode_from_bytes(bytes: &[u8]) -> Result<Option<String>, String> {
+    let img = open_upright_bytes(bytes)?;
+    Ok(barcode_from_image(&img))
+}
+
+fn barcode_from_image(img: &image::DynamicImage) -> Option<String> {
+    agreed(img, decode_retail).or_else(|| ocr_image(img).ok().and_then(|t| code_from_digits(&t)))
 }
 
 /// The first code read at two different sizes.
@@ -682,6 +743,7 @@ Protein 25g";
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn ocr_path_never_enters_the_script() {
         use base64::Engine;
         let path = std::path::Path::new("C:\\Users\\a b\\it's \u{2019}x\\label.png");
@@ -707,7 +769,7 @@ Protein 25g";
         // EXIF segment right after the JPEG start: big-endian TIFF, one IFD entry, Orientation (0x0112) = 6 (turn 90° clockwise)
         let exif: &[u8] = &[0xFF, 0xE1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2A, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0];
         jpeg.splice(2..2, exif.iter().copied());
-        let path = std::env::temp_dir().join(format!("rb-orient-{}", crate::importer::unique_stamp()));
+        let path = crate::scratch_dir().join(format!("rb-orient-{}", crate::importer::unique_stamp()));
         std::fs::write(&path, &jpeg).unwrap();
         let img = open_upright(&path);
         let _ = std::fs::remove_file(&path);
@@ -778,17 +840,47 @@ Protein 25g";
     fn a_printed_barcode_is_read_from_a_picture() {
         use rxing::Writer;
         let bars = rxing::MultiFormatWriter.encode("4006381333931", &rxing::BarcodeFormat::EAN_13, 600, 200).unwrap();
-        let path = std::env::temp_dir().join(format!("rb-barcode-{}.png", crate::importer::unique_stamp()));
-        image::DynamicImage::from(&bars).to_luma8().save(&path).unwrap();
+        let luma = image::DynamicImage::from(&bars).to_luma8();
+        let path = crate::scratch_dir().join(format!("rb-barcode-{}.png", crate::importer::unique_stamp()));
+        luma.save(&path).unwrap();
         let found = barcode_from_photo(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(found.unwrap().as_deref(), Some("4006381333931"));
+
+        // Same picture decoded straight from bytes (web path, no temp file)
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(luma).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert_eq!(barcode_from_bytes(&png.into_inner()).unwrap().as_deref(), Some("4006381333931"));
+
+        // Blank image returns None; corrupt bytes return an error
+        let mut blank = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 20, image::Rgb([255, 255, 255])))
+            .write_to(&mut blank, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(barcode_from_bytes(&blank.into_inner()).unwrap(), None);
+        assert!(barcode_from_bytes(b"not an image").is_err());
     }
 
-    #[cfg(windows)]
+    #[cfg(not(feature = "native"))]
+    #[test]
+    fn without_text_recognition_a_label_photo_asks_for_typing() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 20, image::Rgb([255, 255, 255])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        let path = crate::scratch_dir().join(format!("rb-noocr-{}.png", crate::importer::unique_stamp()));
+        std::fs::write(&path, &bytes).unwrap();
+        let read = read_photo(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(read.unwrap_err().starts_with("Reading a label photo isn't available here yet."));
+        assert!(from_photo_bytes(&bytes, "label.png").unwrap_err().starts_with("Reading a label photo isn't available here yet."));
+    }
+
+    #[cfg(all(windows, feature = "native"))]
     #[test]
     fn ocr_reads_a_picture_whose_path_has_spaces_and_quotes() {
-        let dir = std::env::temp_dir().join(format!("rb ocr it's \u{2019}[x] {}", crate::importer::unique_stamp()));
+        let dir = crate::scratch_dir().join(format!("rb ocr it's \u{2019}[x] {}", crate::importer::unique_stamp()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("label one.png");
         image::RgbImage::from_pixel(200, 100, image::Rgb([255, 255, 255])).save(&png).unwrap();
@@ -797,5 +889,39 @@ Protein 25g";
         let _ = std::fs::remove_dir_all(&dir);
         assert!(direct.is_ok(), "{direct:?}");
         assert!(full.is_ok(), "{full:?}");
+    }
+
+    #[test]
+    fn classify_lookup_splits_barcodes_off_links_and_product_urls() {
+        assert!(classify_lookup("   ").unwrap_err().contains("Paste a product link"));
+        assert!(classify_lookup("bananas").unwrap_err().contains("8–14 digits"));
+        assert_eq!(classify_lookup("4006381333931").unwrap(), LookupTarget::Barcode("4006381333931".into()));
+        assert_eq!(
+            classify_lookup("https://world.openfoodfacts.org/product/4006381333931/something").unwrap(),
+            LookupTarget::Barcode("4006381333931".into())
+        );
+        assert_eq!(
+            classify_lookup("example.com/item").unwrap(),
+            LookupTarget::Url("https://example.com/item".into())
+        );
+        assert!(classify_lookup("ftp://example.com/item").unwrap_err().starts_with(crate::importer::ONLY_WEB));
+        assert!(classify_lookup("https://u:p@example.com/item").unwrap_err().starts_with(crate::importer::USER_IN_LINK));
+    }
+
+    #[test]
+    fn parse_off_product_response_handles_missing_empty_and_valid() {
+        assert_eq!(parse_off_product_response(r#"{"status":0}"#, "4006381333931").unwrap_err(), BARCODE_NOT_FOUND);
+        assert!(parse_off_product_response(r#"{"status":1,"product":{"product_name":"Water"}}"#, "4006381333931").unwrap_err().contains("no nutrition facts"));
+        let g = parse_off_product_response(
+            r#"{"status":1,"product":{"brands":"Fage, Other","product_name":"Greek Yogurt","serving_size":"170g","serving_quantity":170,"nutriments":{"energy-kcal_100g":59,"proteins_100g":10}}}"#,
+            "4006381333931",
+        )
+        .unwrap();
+        assert_eq!(g.food.name, "Fage Greek Yogurt");
+        assert_eq!(g.food.serving_g, 170.0);
+        assert_eq!(g.food.barcode, "4006381333931");
+        assert_eq!(g.source, "Open Food Facts, barcode 4006381333931");
+        assert!((g.food.per_serving.calories.unwrap() - 100.3).abs() < 0.01);
+        assert!((g.food.per_serving.protein_g.unwrap() - 17.0).abs() < 0.01);
     }
 }

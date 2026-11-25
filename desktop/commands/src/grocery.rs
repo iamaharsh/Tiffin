@@ -7,14 +7,14 @@ use recipe_box::model::{self, GroceryItem, GroceryList, Library, PantryItem};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
-pub(crate) struct ListInfo {
+pub struct ListInfo {
     id: u64,
     name: String,
     to_buy: usize,
 }
 
 #[derive(Serialize)]
-pub(crate) struct Item {
+pub struct Item {
     id: u64,
     name: String,
     note: String,
@@ -29,7 +29,7 @@ pub(crate) struct Item {
 }
 
 #[derive(Serialize)]
-pub(crate) struct Groceries {
+pub struct Groceries {
     lists: Vec<ListInfo>,
     /// the list shown (the asked-for one, or the first)
     list: u64,
@@ -50,8 +50,7 @@ fn pantry_names(lib: &Library, today: i32) -> Vec<String> {
     lib.pantry.iter().filter(|p| p.in_stock && p.expires.is_none_or(|e| e >= today)).map(|p| p.name.clone()).collect()
 }
 
-#[tauri::command]
-pub(crate) fn groceries(state: tauri::State<Shared>, list: u64) -> Groceries {
+pub fn groceries(state: &Shared, list: u64) -> Result<Groceries, String> {
     // There's always at least one list (the classic app makes it when the screen opens).
     if state.lock().unwrap().lib.grocery_lists.is_empty() {
         let _ = mutate(&state, |st| {
@@ -70,7 +69,7 @@ pub(crate) fn groceries(state: tauri::State<Shared>, list: u64) -> Groceries {
         let r = lib.recipes.iter().find(|r| r.name == first)?;
         model::recipe_label(&lib.label_colors, &r.categories).1
     };
-    Groceries {
+    Ok(Groceries {
         lists: lib.grocery_lists.iter().map(|l| ListInfo { id: l.id, name: l.name.clone(), to_buy: l.items.iter().filter(|i| !i.purchased).count() }).collect(),
         list: shown.map_or(0, |l| l.id),
         items: shown
@@ -96,11 +95,11 @@ pub(crate) fn groceries(state: tauri::State<Shared>, list: u64) -> Groceries {
         by_recipe: lib.settings.grocery_by_recipe,
         pantry: lib.pantry.len(),
         today: model::today(),
-    }
+    })
 }
 
 #[derive(Serialize)]
-pub(crate) struct Preview {
+pub struct Preview {
     items: usize,
     in_pantry: Vec<String>,
     recipes: usize,
@@ -128,15 +127,13 @@ fn add_items(st: &mut AppState, list: u64, items: Vec<GroceryItem>) -> Result<St
 }
 
 /// What "Add to Grocery List" would add: the recipe's ingredients × times cooked, combined.
-#[tauri::command]
-pub(crate) fn grocery_preview(state: tauri::State<Shared>, id: u64, times: u32, skip: bool) -> Result<Preview, String> {
+pub fn grocery_preview(state: &Shared, id: u64, times: u32, skip: bool) -> Result<Preview, String> {
     let s = state.lock().unwrap();
     let r = s.lib.recipe(id).ok_or(GONE)?;
     Ok(preview_of(&groceries::build_times(&s.lib, &[(r, times.clamp(1, 50))], skip, model::today())))
 }
 
-#[tauri::command]
-pub(crate) fn add_recipe_to_list(state: tauri::State<Shared>, id: u64, list: u64, times: u32, skip: bool) -> Result<String, String> {
+pub fn add_recipe_to_list(state: &Shared, id: u64, list: u64, times: u32, skip: bool) -> Result<String, String> {
     mutate(&state, |st| {
         let r = st.lib.recipe(id).ok_or(GONE)?;
         let rep = groceries::build_times(&st.lib, &[(r, times.clamp(1, 50))], skip, model::today());
@@ -144,15 +141,13 @@ pub(crate) fn add_recipe_to_list(state: tauri::State<Shared>, id: u64, list: u64
     })
 }
 
-#[tauri::command]
-pub(crate) fn plan_preview(state: tauri::State<Shared>, from: i32, to: i32, skip: bool) -> Preview {
+pub fn plan_preview(state: &Shared, from: i32, to: i32, skip: bool) -> Result<Preview, String> {
     let s = state.lock().unwrap();
     let recipes = groceries::planned_recipes(&s.lib, from, to);
-    preview_of(&groceries::build(&s.lib, &recipes, skip, model::today()))
+    Ok(preview_of(&groceries::build(&s.lib, &recipes, skip, model::today())))
 }
 
-#[tauri::command]
-pub(crate) fn add_plan_to_list(state: tauri::State<Shared>, list: u64, from: i32, to: i32, skip: bool) -> Result<String, String> {
+pub fn add_plan_to_list(state: &Shared, list: u64, from: i32, to: i32, skip: bool) -> Result<String, String> {
     mutate(&state, |st| {
         let recipes = groceries::planned_recipes(&st.lib, from, to);
         let rep = groceries::build(&st.lib, &recipes, skip, model::today());
@@ -163,8 +158,7 @@ pub(crate) fn add_plan_to_list(state: tauri::State<Shared>, list: u64, from: i32
 }
 
 /// Quick add: "2 cups milk" becomes milk, 2 cups, filed under its store section.
-#[tauri::command]
-pub(crate) fn add_item(state: tauri::State<Shared>, list: u64, text: String) -> Result<(), String> {
+pub fn add_item(state: &Shared, list: u64, text: String) -> Result<(), String> {
     let (name, quantity) = split_quick_add(&text);
     if name.trim().is_empty() {
         return Ok(());
@@ -182,7 +176,7 @@ pub(crate) fn add_item(state: tauri::State<Shared>, list: u64, text: String) -> 
 /// One change to an item: tick it, move it to a section, step its amount, or retype it.
 #[derive(Deserialize, Default)]
 #[serde(default)]
-pub(crate) struct ItemChange {
+pub struct ItemChange {
     purchased: Option<bool>,
     aisle: Option<String>,
     step: Option<f64>,
@@ -190,8 +184,7 @@ pub(crate) struct ItemChange {
     quantity: Option<String>,
 }
 
-#[tauri::command]
-pub(crate) fn update_item(state: tauri::State<Shared>, list: u64, id: u64, change: ItemChange) -> Result<(), String> {
+pub fn update_item(state: &Shared, list: u64, id: u64, change: ItemChange) -> Result<(), String> {
     mutate(&state, |st| {
         let l = list_mut(&mut st.lib, list)?;
         let it = l.items.iter_mut().find(|i| i.id == id).ok_or("That item isn't on the list any more.")?;
@@ -217,13 +210,13 @@ pub(crate) fn update_item(state: tauri::State<Shared>, list: u64, id: u64, chang
 
 /// A removal that can be undone: Version History snapshot first, then the lists and pantry as
 /// they were are kept for Undo. Returns the message for the undo bar (None when nothing went).
-pub(crate) fn undoable(state: &Shared, why: &str, msg: impl Fn(usize) -> String, f: impl FnOnce(&mut Library) -> Result<usize, String>) -> Result<Option<String>, String> {
+pub fn undoable(state: &Shared, why: &str, msg: impl Fn(usize) -> String, f: impl FnOnce(&mut Library) -> Result<usize, String>) -> Result<Option<String>, String> {
     undoable_with(state, why, 0, msg, f)
 }
 
 /// Removing one item at a time (a busy shop) takes at most one snapshot every few minutes, so
 /// it doesn't push older restore points out of Version History; Undo covers each removal.
-pub(crate) fn undoable_single(state: &Shared, why: &str, msg: impl Fn(usize) -> String, f: impl FnOnce(&mut Library) -> Result<usize, String>) -> Result<Option<String>, String> {
+pub fn undoable_single(state: &Shared, why: &str, msg: impl Fn(usize) -> String, f: impl FnOnce(&mut Library) -> Result<usize, String>) -> Result<Option<String>, String> {
     undoable_with(state, why, SINGLE_SNAPSHOT_GAP, msg, f)
 }
 
@@ -242,8 +235,7 @@ fn undoable_with(state: &Shared, why: &str, gap: u64, msg: impl Fn(usize) -> Str
     })
 }
 
-#[tauri::command]
-pub(crate) fn remove_item(state: tauri::State<Shared>, list: u64, id: u64) -> Result<Option<String>, String> {
+pub fn remove_item(state: &Shared, list: u64, id: u64) -> Result<Option<String>, String> {
     undoable_single(&state, "before removing a grocery item", |_| "Removed 1 item".into(), |lib| {
         let l = list_mut(lib, list)?;
         let before = l.items.len();
@@ -253,8 +245,7 @@ pub(crate) fn remove_item(state: tauri::State<Shared>, list: u64, id: u64) -> Re
     })
 }
 
-#[tauri::command]
-pub(crate) fn new_list(state: tauri::State<Shared>, name: String) -> Result<u64, String> {
+pub fn new_list(state: &Shared, name: String) -> Result<u64, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Give the list a name.".into());
@@ -266,8 +257,7 @@ pub(crate) fn new_list(state: tauri::State<Shared>, name: String) -> Result<u64,
     })
 }
 
-#[tauri::command]
-pub(crate) fn rename_list(state: tauri::State<Shared>, list: u64, name: String) -> Result<(), String> {
+pub fn rename_list(state: &Shared, list: u64, name: String) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Give the list a name.".into());
@@ -281,8 +271,7 @@ pub(crate) fn rename_list(state: tauri::State<Shared>, list: u64, name: String) 
 }
 
 /// There's always at least one list, so the last one can't be deleted.
-#[tauri::command]
-pub(crate) fn delete_list(state: tauri::State<Shared>, list: u64) -> Result<Option<String>, String> {
+pub fn delete_list(state: &Shared, list: u64) -> Result<Option<String>, String> {
     undoable(&state, "before deleting a grocery list", |_| "Deleted the list".into(), |lib| {
         if lib.grocery_lists.len() < 2 {
             return Err("This is your only grocery list, so it stays. You can clear its items instead.".into());
@@ -294,8 +283,7 @@ pub(crate) fn delete_list(state: tauri::State<Shared>, list: u64) -> Result<Opti
 }
 
 /// "Clear all items": this list or every list (all, only bought, or only still to buy), and/or the pantry.
-#[tauri::command]
-pub(crate) fn clear_items(state: tauri::State<Shared>, list: u64, all_lists: bool, pantry: bool, which: u8) -> Result<Option<String>, String> {
+pub fn clear_items(state: &Shared, list: u64, all_lists: bool, pantry: bool, which: u8) -> Result<Option<String>, String> {
     undoable(&state, "before clearing items", |n| format!("Cleared {n} item{}", if n == 1 { "" } else { "s" }), |lib| {
         let t = model::now_secs();
         let mut n = 0;
@@ -313,8 +301,7 @@ pub(crate) fn clear_items(state: tauri::State<Shared>, list: u64, all_lists: boo
     })
 }
 
-#[tauri::command]
-pub(crate) fn remove_pantry_items(state: tauri::State<Shared>, list: u64) -> Result<Option<String>, String> {
+pub fn remove_pantry_items(state: &Shared, list: u64) -> Result<Option<String>, String> {
     undoable(&state, "before removing items already in the pantry", |n| format!("Removed {n} item{} you already have", if n == 1 { "" } else { "s" }), |lib| {
         let have = pantry_names(lib, model::today());
         let l = list_mut(lib, list)?;
@@ -325,8 +312,7 @@ pub(crate) fn remove_pantry_items(state: tauri::State<Shared>, list: u64) -> Res
     })
 }
 
-#[tauri::command]
-pub(crate) fn move_bought_to_pantry(state: tauri::State<Shared>, list: u64) -> Result<Option<String>, String> {
+pub fn move_bought_to_pantry(state: &Shared, list: u64) -> Result<Option<String>, String> {
     undoable(&state, "before moving bought items to the pantry", |n| format!("Moved {n} bought item{} to the pantry", if n == 1 { "" } else { "s" }), |lib| {
         let today = model::today();
         let bought: Vec<GroceryItem> = list_mut(lib, list)?.items.iter().filter(|i| i.purchased).cloned().collect();
@@ -357,8 +343,7 @@ pub(crate) fn move_bought_to_pantry(state: tauri::State<Shared>, list: u64) -> R
     })
 }
 
-#[tauri::command]
-pub(crate) fn undo_groceries(state: tauri::State<Shared>) -> Result<(), String> {
+pub fn undo_groceries(state: &Shared) -> Result<(), String> {
     crate::mutate_keeping_undo(&state, |st| {
         let (lists, pantry) = st.undo.take().ok_or("Undo isn't available after another change.")?;
         let t = model::now_secs();
@@ -370,8 +355,7 @@ pub(crate) fn undo_groceries(state: tauri::State<Shared>) -> Result<(), String> 
     })
 }
 
-#[tauri::command]
-pub(crate) fn set_grocery_by_recipe(state: tauri::State<Shared>, on: bool) -> Result<(), String> {
+pub fn set_grocery_by_recipe(state: &Shared, on: bool) -> Result<(), String> {
     mutate(&state, |st| {
         st.lib.settings.grocery_by_recipe = on;
         Ok(())

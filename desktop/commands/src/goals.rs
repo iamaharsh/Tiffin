@@ -8,25 +8,25 @@ use recipe_box::tracker::targets::{self, TargetsDraft, TargetsResult, TargetsVie
 use serde::Serialize;
 
 /// What the Targets page opens with. `today` is the page's local day (`YYYY-MM-DD`).
-pub(crate) fn view_of(shared: &Shared, today: &str) -> TargetsView {
+pub fn view_of(shared: &Shared, today: &str) -> TargetsView {
     targets::targets_view(&mut shared.lock().unwrap().journal, today)
 }
 
 /// What a draft works out to, exactly as Save Targets would store it. Writes nothing.
-pub(crate) fn preview_of(shared: &Shared, draft: &TargetsDraft, today: &str) -> TargetsResult {
+pub fn preview_of(shared: &Shared, draft: &TargetsDraft, today: &str) -> TargetsResult {
     targets::preview(&mut shared.lock().unwrap().journal, draft, today)
 }
 
 /// The page after Save Targets. `confirm` is the sentence to ask when a typed weight is far from the last weigh-in:
 /// nothing was saved, and saving again with `confirmed` true does it.
 #[derive(Serialize)]
-pub(crate) struct SavedTargets {
-    pub(crate) view: TargetsView,
-    pub(crate) confirm: Option<String>,
+pub struct SavedTargets {
+    pub view: TargetsView,
+    pub confirm: Option<String>,
 }
 
 /// Save a draft as the target in force from `today`, then read the page back.
-pub(crate) fn save(shared: &Shared, draft: &TargetsDraft, today: &str, confirmed: bool) -> Result<SavedTargets, String> {
+pub fn save(shared: &Shared, draft: &TargetsDraft, today: &str, confirmed: bool) -> Result<SavedTargets, String> {
     mutate_journal(shared, |st| {
         let saved = targets::save(&mut st.journal, draft, today, model::now_secs(), confirmed)?;
         Ok(SavedTargets { view: targets::targets_view(&mut st.journal, today), confirm: saved.confirm })
@@ -34,30 +34,26 @@ pub(crate) fn save(shared: &Shared, draft: &TargetsDraft, today: &str, confirmed
 }
 
 /// Take the offered target update: a new target effective `today`. Nothing else changes the target when the weight drifts.
-pub(crate) fn accept(shared: &Shared, today: &str) -> Result<TargetsView, String> {
+pub fn accept(shared: &Shared, today: &str) -> Result<TargetsView, String> {
     mutate_journal(shared, |st| {
         targets::accept_update(&mut st.journal, today)?;
         Ok(targets::targets_view(&mut st.journal, today))
     })
 }
 
-#[tauri::command]
-pub(crate) fn targets_view(state: tauri::State<Shared>, today: String) -> TargetsView {
-    view_of(&state, &today)
+pub fn targets_view(state: &Shared, today: String) -> Result<TargetsView, String> {
+    Ok(view_of(&state, &today))
 }
 
-#[tauri::command]
-pub(crate) fn targets_preview(state: tauri::State<Shared>, draft: TargetsDraft, today: String) -> TargetsResult {
-    preview_of(&state, &draft, &today)
+pub fn targets_preview(state: &Shared, draft: TargetsDraft, today: String) -> Result<TargetsResult, String> {
+    Ok(preview_of(&state, &draft, &today))
 }
 
-#[tauri::command]
-pub(crate) fn save_targets(state: tauri::State<Shared>, draft: TargetsDraft, today: String, confirmed: bool) -> Result<SavedTargets, String> {
+pub fn save_targets(state: &Shared, draft: TargetsDraft, today: String, confirmed: bool) -> Result<SavedTargets, String> {
     save(&state, &draft, &today, confirmed)
 }
 
-#[tauri::command]
-pub(crate) fn accept_target_update(state: tauri::State<Shared>, today: String) -> Result<TargetsView, String> {
+pub fn accept_target_update(state: &Shared, today: String) -> Result<TargetsView, String> {
     accept(&state, &today)
 }
 
@@ -75,14 +71,14 @@ mod tests {
     const TODAY: &str = "2026-11-17";
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-desktop-goals-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-desktop-goals-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
     /// Male, born 2000-05-01, 180 cm, 80 kg typed, light movement: 2,475 kcal.
-    pub(crate) fn draft() -> TargetsDraft {
+    pub fn draft() -> TargetsDraft {
         TargetsDraft {
             sex: Some(Sex::Male),
             birth_date: Some("2000-05-01".into()),

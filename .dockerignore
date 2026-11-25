@@ -1,0 +1,7 @@
+# Only the two crates the helper image builds from.
+*
+!app/
+!helper/
+app/target/
+helper/target/
+app/shots/

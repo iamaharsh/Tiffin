@@ -418,7 +418,7 @@ mod tests {
     use std::path::PathBuf;
 
     pub(crate) fn tdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-exercise-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-exercise-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

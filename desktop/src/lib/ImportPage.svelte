@@ -160,17 +160,19 @@
     </div>
     <div class="right">
       {#if updatedAny}<button class="btn small ghost" onclick={builtin}>Use Built-In Rules</button>{/if}
-      <button class="btn small" onclick={fromSync}>Check Sync Folder</button>
+      {#if !api.isWeb}<button class="btn small" onclick={fromSync}>Check Sync Folder</button>{/if}
       <button class="btn small" onclick={() => rulesFile.click()}>Load Rules Update…</button>
       <input bind:this={rulesFile} type="file" accept=".json,application/json" hidden onchange={rulesUpdate} />
     </div>
   </section>
 
-  <section>
-    <h2 class="caps">Recipe inbox</h2>
-    <p class="fine">Claude or any other app can send recipes here: drop a web link, recipe text or recipe JSON into <code class="selectable">{inbox}</code>, or run <code>recipe_box --import &lt;file or link&gt;</code>. New recipes appear above, ready to review.</p>
-    <button class="link" onclick={onsetupclaude}>Set up sending from Claude…</button>
-  </section>
+  {#if !api.isWeb}
+    <section>
+      <h2 class="caps">Recipe inbox</h2>
+      <p class="fine">Claude or any other app can send recipes here: drop a web link, recipe text or recipe JSON into <code class="selectable">{inbox}</code>, or run <code>recipe_box --import &lt;file or link&gt;</code>. New recipes appear above, ready to review.</p>
+      <button class="link" onclick={onsetupclaude}>Set up sending from Claude…</button>
+    </section>
+  {/if}
 </div>
 
 <style>

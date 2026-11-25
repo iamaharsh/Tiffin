@@ -144,6 +144,8 @@ pub fn open_external(target: &str) -> bool {
     let r = std::process::Command::new("open").arg(target).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(target).spawn();
+    #[cfg(not(any(windows, unix)))]
+    let r: Result<(), ()> = { let _ = target; Err(()) }; // the browser build opens links itself
     r.is_ok()
 }
 

@@ -1,5 +1,5 @@
 import { mount } from 'svelte'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './lib/transport'
 import './app.css'
 import App from './App.svelte'
 import { applyTheme, savedTheme } from './lib/theme'

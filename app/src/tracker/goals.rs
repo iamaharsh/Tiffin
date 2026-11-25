@@ -813,7 +813,7 @@ mod tests {
     use std::fs;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-goals-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-goals-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -1427,7 +1427,7 @@ mod tests {
         for x in [&d, &d2] {
             let _ = fs::remove_dir_all(x);
         }
-        let _ = fs::remove_dir_all(std::env::temp_dir().join(format!("rb-goals-save-earlier-{}", std::process::id())));
+        let _ = fs::remove_dir_all(crate::scratch_dir().join(format!("rb-goals-save-earlier-{}", crate::test_pid())));
     }
 
     #[test]
@@ -1588,7 +1588,7 @@ mod tests {
         }
         assert_eq!(weights(&mut e).len(), 2, "only the two that were accepted");
         let _ = fs::remove_dir_all(&d);
-        let _ = fs::remove_dir_all(std::env::temp_dir().join(format!("rb-goals-ask-edge-{}", std::process::id())));
+        let _ = fs::remove_dir_all(crate::scratch_dir().join(format!("rb-goals-ask-edge-{}", crate::test_pid())));
     }
 
     /// A target built on a typed 82 kg on 2026-11-01, then daily weigh-ins at `kg` up to `last` (a day in November).

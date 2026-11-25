@@ -700,7 +700,7 @@ mod tests {
     use super::*;
 
     fn tdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-journal-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-journal-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn journal_months_ignore_bak_tmp_and_damaged_names() {
         let d = tdir("names");
-        for f in ["2026-11.json", "2026-11.json.bak", "2026-11.tmp", "2026-11-damaged-x.json", "profile.json", "2026-13.json", "notes.json"] {
+        for f in ["2026-11.json", "2026-11.json.bak", "2026-11.json.bak.tmp", "2026-11.tmp", "2026-11-damaged-x.json", "profile.json", "2026-13.json", "notes.json"] {
             fs::write(d.join(f), "{}").unwrap();
         }
         fs::create_dir_all(d.join("history")).unwrap();

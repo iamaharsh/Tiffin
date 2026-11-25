@@ -9,12 +9,12 @@ use recipe_box::tracker::exercise::{self, Activities, ActivityRef, Estimate};
 use recipe_box::tracker::journal::CustomActivity;
 
 /// What an activity gives for a duration on `day`, with the working. Writes nothing.
-pub(crate) fn estimate_in(shared: &Shared, day: &str, activity: &ActivityRef, minutes: f64) -> Result<Estimate, String> {
+pub fn estimate_in(shared: &Shared, day: &str, activity: &ActivityRef, minutes: f64) -> Result<Estimate, String> {
     exercise::estimate(&mut shared.lock().unwrap().journal, day, activity, minutes)
 }
 
 /// Log a workout into `day`. A single add ends the pending undo, as a single food add does (Phase 3 D-12).
-pub(crate) fn log_in(shared: &Shared, day: &str, today: &str, activity: &ActivityRef, minutes: f64, kcal: Option<f64>) -> Result<Logged, String> {
+pub fn log_in(shared: &Shared, day: &str, today: &str, activity: &ActivityRef, minutes: f64, kcal: Option<f64>) -> Result<Logged, String> {
     mutate_journal(shared, |st| {
         st.journal.take_undo();
         let name = exercise::log(&mut st.journal, day, activity, minutes, kcal, model::now_secs())?;
@@ -23,17 +23,17 @@ pub(crate) fn log_in(shared: &Shared, day: &str, today: &str, activity: &Activit
 }
 
 /// What the Add Exercise dialog lists: Recent, My Activities and the common rows for an empty box, ranked rows for what was typed. Writes nothing.
-pub(crate) fn activities_in(shared: &Shared, q: &str, today: &str) -> Result<Activities, String> {
+pub fn activities_in(shared: &Shared, q: &str, today: &str) -> Result<Activities, String> {
     exercise::activities(&mut shared.lock().unwrap().journal, q, today)
 }
 
 /// Save one of the person's own activities (a new one, or a known uid replaced) and return its uid.
-pub(crate) fn save_in(shared: &Shared, activity: CustomActivity) -> Result<String, String> {
+pub fn save_in(shared: &Shared, activity: CustomActivity) -> Result<String, String> {
     mutate_journal(shared, |st| exercise::save_activity(&mut st.journal, activity))
 }
 
 /// Change a workout's duration and calories against its frozen basis, and keep the undo.
-pub(crate) fn edit_in(shared: &Shared, day: &str, today: &str, uid: &str, minutes: f64, kcal: Option<f64>, use_estimate: bool) -> Result<Changed, String> {
+pub fn edit_in(shared: &Shared, day: &str, today: &str, uid: &str, minutes: f64, kcal: Option<f64>, use_estimate: bool) -> Result<Changed, String> {
     mutate_journal(shared, |st| {
         let (name, u) = exercise::edit(&mut st.journal, day, uid, minutes, kcal, use_estimate, model::now_secs())?;
         st.journal.set_undo(u);
@@ -42,7 +42,7 @@ pub(crate) fn edit_in(shared: &Shared, day: &str, today: &str, uid: &str, minute
 }
 
 /// Delete a workout (it stays in the month file) and keep the undo.
-pub(crate) fn delete_in(shared: &Shared, day: &str, today: &str, uid: &str) -> Result<Changed, String> {
+pub fn delete_in(shared: &Shared, day: &str, today: &str, uid: &str) -> Result<Changed, String> {
     mutate_journal(shared, |st| {
         let (name, u) = exercise::delete(&mut st.journal, day, uid, model::now_secs())?;
         st.journal.set_undo(u);
@@ -51,42 +51,35 @@ pub(crate) fn delete_in(shared: &Shared, day: &str, today: &str, uid: &str) -> R
 }
 
 /// Remove one of the person's own activities. What was logged with it stays as logged.
-pub(crate) fn delete_activity_in(shared: &Shared, uid: &str) -> Result<String, String> {
+pub fn delete_activity_in(shared: &Shared, uid: &str) -> Result<String, String> {
     mutate_journal(shared, |st| exercise::delete_activity(&mut st.journal, uid))
 }
 
-#[tauri::command]
-pub(crate) fn exercise_activities(state: tauri::State<Shared>, q: String, today: String) -> Result<Activities, String> {
+pub fn exercise_activities(state: &Shared, q: String, today: String) -> Result<Activities, String> {
     activities_in(&state, &q, &today)
 }
 
-#[tauri::command]
-pub(crate) fn exercise_estimate(state: tauri::State<Shared>, day: String, activity: ActivityRef, minutes: f64) -> Result<Estimate, String> {
+pub fn exercise_estimate(state: &Shared, day: String, activity: ActivityRef, minutes: f64) -> Result<Estimate, String> {
     estimate_in(&state, &day, &activity, minutes)
 }
 
-#[tauri::command]
-pub(crate) fn log_exercise(state: tauri::State<Shared>, day: String, today: String, activity: ActivityRef, minutes: f64, kcal: Option<f64>) -> Result<Logged, String> {
+pub fn log_exercise(state: &Shared, day: String, today: String, activity: ActivityRef, minutes: f64, kcal: Option<f64>) -> Result<Logged, String> {
     log_in(&state, &day, &today, &activity, minutes, kcal)
 }
 
-#[tauri::command]
-pub(crate) fn edit_exercise(state: tauri::State<Shared>, day: String, today: String, uid: String, minutes: f64, kcal: Option<f64>, use_estimate: bool) -> Result<Changed, String> {
+pub fn edit_exercise(state: &Shared, day: String, today: String, uid: String, minutes: f64, kcal: Option<f64>, use_estimate: bool) -> Result<Changed, String> {
     edit_in(&state, &day, &today, &uid, minutes, kcal, use_estimate)
 }
 
-#[tauri::command]
-pub(crate) fn delete_exercise(state: tauri::State<Shared>, day: String, today: String, uid: String) -> Result<Changed, String> {
+pub fn delete_exercise(state: &Shared, day: String, today: String, uid: String) -> Result<Changed, String> {
     delete_in(&state, &day, &today, &uid)
 }
 
-#[tauri::command]
-pub(crate) fn delete_activity(state: tauri::State<Shared>, uid: String) -> Result<String, String> {
+pub fn delete_activity(state: &Shared, uid: String) -> Result<String, String> {
     delete_activity_in(&state, &uid)
 }
 
-#[tauri::command]
-pub(crate) fn save_activity(state: tauri::State<Shared>, activity: CustomActivity) -> Result<String, String> {
+pub fn save_activity(state: &Shared, activity: CustomActivity) -> Result<String, String> {
     save_in(&state, activity)
 }
 
@@ -100,7 +93,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-desktop-exercise-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-desktop-exercise-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

@@ -1,579 +1,23 @@
 //! Tiffin with a web interface. The window is Svelte (../src); everything it shows comes
 //! from the `recipe_box` crate through the commands below.
 
-mod foods;
-mod body;
-mod diary;
-mod exercise;
-mod goals;
-mod grocery;
-mod home;
+mod foods_online;
 mod importing;
-mod meals;
-mod menus;
-mod pantry;
-mod reports;
 mod settings;
 mod update;
 
-use recipe_box::model::{self, GroceryList, Library, MealType, Nutrients, PantryItem, Recipe};
-use recipe_box::{cooking, health, importer, inbox, ingredients, nutrition, selftest, shortcut, storage, tracker};
+use recipe_box::model;
+use recipe_box::{cooking, inbox, ingredients, selftest, shortcut, storage};
 use tauri::Manager;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-pub(crate) struct AppState {
-    pub(crate) lib: Library,
-    pub(crate) store: storage::Store,
-    /// Grocery lists and pantry as they were before the last removal, for Undo.
-    pub(crate) undo: Option<(Vec<GroceryList>, Vec<PantryItem>)>,
-    /// Diary month files and the profile, in the journal folder beside library.json.
-    pub(crate) journal: tracker::journal::Journal,
-    /// A page holds typed input that is not saved yet (set by the page through set_unsaved); an update install waits for it.
-    pub(crate) unsaved: bool,
-}
-
-pub(crate) type Shared = Mutex<AppState>;
-
-pub(crate) const GONE: &str = "That recipe isn't in the library any more.";
-
-#[derive(Serialize)]
-struct Category {
-    path: String,
-    name: String,
-    depth: usize,
-    label: Option<usize>,
-    count: usize,
-}
-
-#[derive(Serialize)]
-struct Overview {
-    sort: u8,
-    categories: Vec<Category>,
-    /// all, recent, top, favorites, uncategorized, trash
-    counts: [usize; 6],
-    pinned: Vec<Pinned>,
-    /// grocery list names, for "Add to Grocery List"
-    lists: Vec<String>,
-    /// the viewer's local calendar day as days since 1970-01-01, the number the diary compares Meal.day with (never `model::today()`, the UTC day)
-    today: i32,
-    /// why the library can't be changed right now (damaged file); shown as a permanent banner
-    locked: Option<String>,
-    /// the sidebar's tabs in the person's order, and the tab Tiffin opens on (see `recipe_box::sidebar`)
-    sidebar: Vec<&'static str>,
-    launch: &'static str,
-}
-
-/// A one-time or standing message about the library file. `kept` is the verified copy's path, or ""
-/// when the library file was missing (recovered) or no copy could be made yet (damaged).
-#[derive(Serialize)]
-pub(crate) struct NoticeView {
-    /// recovered | replaced | damaged
-    kind: &'static str,
-    file: String,
-    kept: String,
-}
-
-#[derive(Serialize)]
-struct Pinned {
-    id: u64,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct Card {
-    id: u64,
-    name: String,
-    rating: u8,
-    favorite: bool,
-    label: String,
-    label_index: Option<usize>,
-    photo: String,
-    seed: u32,
-    total_time: String,
-    flags: usize,
-    pinned: bool,
-    in_trash: bool,
-}
-
-#[derive(Serialize)]
-struct Row {
-    amount: Option<String>,
-    text: String,
-    heading: bool,
-}
-
-/// A piece of a step: plain text, or a time phrase ("10 minutes") that can start a timer.
-#[derive(Serialize)]
-struct Piece {
-    text: String,
-    seconds: Option<u32>,
-}
-
-fn step_pieces(t: &str) -> Vec<Piece> {
-    let mut out = vec![];
-    let mut at = 0;
-    for s in ingredients::find_times(t) {
-        if s.start > at {
-            out.push(Piece { text: t[at..s.start].to_string(), seconds: None });
-        }
-        out.push(Piece { text: t[s.start..s.end].to_string(), seconds: Some(s.seconds) });
-        at = s.end;
-    }
-    if at < t.len() {
-        out.push(Piece { text: t[at..].to_string(), seconds: None });
-    }
-    out
-}
-
-/// The fields the edit page changes. Everything else on the recipe (nutrition edits, trash,
-/// pins, ids) is left as it is on disk.
-#[derive(Serialize, Deserialize, Default)]
-struct Draft {
-    name: String,
-    rating: u8,
-    servings: String,
-    prep_time: String,
-    cook_time: String,
-    total_time: String,
-    difficulty: String,
-    source: String,
-    source_url: String,
-    video_url: String,
-    categories: Vec<String>,
-    description: String,
-    ingredients: String,
-    directions: String,
-    notes: String,
-    photo: String,
-    /// read only: picks the painted placeholder when there's no photo
-    photo_seed: u32,
-}
-
-impl Draft {
-    fn of(r: &Recipe) -> Draft {
-        Draft {
-            name: r.name.clone(),
-            rating: r.rating,
-            servings: r.servings.clone(),
-            prep_time: r.prep_time.clone(),
-            cook_time: r.cook_time.clone(),
-            total_time: r.total_time.clone(),
-            difficulty: r.difficulty.clone(),
-            source: r.source.clone(),
-            source_url: r.source_url.clone(),
-            video_url: r.video_url.clone(),
-            categories: r.categories.clone(),
-            description: r.description.clone(),
-            ingredients: r.ingredients.clone(),
-            directions: r.directions.clone(),
-            notes: r.notes.clone(),
-            photo: r.photo.clone(),
-            photo_seed: r.photo_seed,
-        }
-    }
-    fn apply(&self, r: &mut Recipe) {
-        let d = self;
-        r.name = d.name.clone();
-        r.rating = d.rating.min(5);
-        r.servings = d.servings.clone();
-        r.prep_time = d.prep_time.clone();
-        r.cook_time = d.cook_time.clone();
-        r.total_time = d.total_time.clone();
-        r.difficulty = d.difficulty.clone();
-        r.source = d.source.clone();
-        r.source_url = d.source_url.clone();
-        r.video_url = d.video_url.clone();
-        r.categories = d.categories.clone();
-        r.description = d.description.clone();
-        r.ingredients = d.ingredients.clone();
-        r.directions = d.directions.clone();
-        r.notes = d.notes.clone();
-        r.photo = d.photo.clone();
-    }
-}
-
-#[derive(Serialize)]
-struct Detail {
-    card: Card,
-    description: String,
-    notes: String,
-    source: String,
-    source_url: String,
-    prep_time: String,
-    cook_time: String,
-    servings: String,
-    difficulty: String,
-    rows: Vec<Row>,
-    steps: Vec<Vec<Piece>>,
-    /// where the video button goes (starts at 0:00), if the recipe has a video link
-    video: Option<String>,
-    per_serving: Nutrients,
-    nutrition_edited: bool,
-    nutrition_counted: usize,
-    nutrition_skipped: usize,
-    flags: Vec<String>,
-}
-
-fn in_category(r: &Recipe, cat: &str) -> bool {
-    r.categories.iter().any(|x| x == cat || x.strip_prefix(cat).is_some_and(|rest| rest.starts_with('/')))
-}
-
-fn card(lib: &Library, r: &Recipe) -> Card {
-    let (label, label_index) = model::recipe_label(&lib.label_colors, &r.categories);
-    let total_time = if r.total_time.trim().is_empty() { ingredients::sum_times(&r.prep_time, &r.cook_time) } else { r.total_time.clone() };
-    Card {
-        id: r.id,
-        name: r.name.clone(),
-        rating: r.rating,
-        favorite: r.favorite,
-        label,
-        label_index,
-        photo: r.photo.clone(),
-        seed: r.photo_seed,
-        total_time,
-        flags: r.review_flags.len(),
-        pinned: r.pinned,
-        in_trash: r.in_trash,
-    }
-}
-
-#[tauri::command]
-fn overview(state: tauri::State<Shared>, today: String) -> Result<Overview, String> {
-    overview_of(&state.lock().unwrap(), &today)
-}
-
-fn overview_of(s: &AppState, today: &str) -> Result<Overview, String> {
-    let live: Vec<&Recipe> = s.lib.recipes.iter().filter(|r| !r.in_trash).collect();
-    let mut paths = s.lib.categories.clone();
-    paths.sort_by_key(|p| p.to_lowercase());
-    let categories = paths
-        .iter()
-        .map(|p| Category {
-            name: p.rsplit('/').next().unwrap_or(p).to_string(),
-            depth: p.matches('/').count(),
-            label: model::label_index(&s.lib.label_colors, p),
-            count: live.iter().filter(|r| in_category(r, p)).count(),
-            path: p.clone(),
-        })
-        .collect();
-    let n = |f: &dyn Fn(&Recipe) -> bool| live.iter().filter(|r| f(r)).count();
-    Ok(Overview {
-        sort: s.lib.settings.recipe_sort,
-        categories,
-        counts: [
-            live.len(),
-            live.len(),
-            n(&|r| r.rating >= 4),
-            n(&|r| r.favorite),
-            n(&|r| r.categories.is_empty()),
-            s.lib.recipes.len() - live.len(),
-        ],
-        pinned: live.iter().filter(|r| r.pinned).map(|r| Pinned { id: r.id, name: r.name.clone() }).collect(),
-        lists: s.lib.grocery_lists.iter().map(|l| l.name.clone()).collect(),
-        today: tracker::diary::day_number(today)?,
-        locked: s.store.problem.as_ref().map(|p| p.banner()),
-        sidebar: recipe_box::sidebar::order(&s.lib.settings),
-        launch: recipe_box::sidebar::launch_page(&s.lib.settings),
-    })
-}
-
-/// `view`: all | recent | top | favorites | uncategorized | trash | cat:<path>.
-/// `sort`: 0 name, 1 rating, 2 most recent (the classic app's settings values).
-#[tauri::command]
-fn list(state: tauri::State<Shared>, view: String, search: String, sort: u8) -> Vec<Card> {
-    let s = state.lock().unwrap();
-    let words = model::search_words(&search);
-    let mut v: Vec<&Recipe> = s
-        .lib
-        .recipes
-        .iter()
-        .filter(|r| r.in_trash == (view == "trash"))
-        .filter(|r| match view.as_str() {
-            "top" => r.rating >= 4,
-            "favorites" => r.favorite,
-            "uncategorized" => r.categories.is_empty(),
-            v => v.strip_prefix("cat:").map_or(true, |c| in_category(r, c)),
-        })
-        .filter(|r| model::recipe_matches(r, &words))
-        .collect();
-    let sort = match view.as_str() {
-        "recent" => 2,
-        "top" => 1,
-        _ => sort,
-    };
-    match sort {
-        1 => v.sort_by(|a, b| b.rating.cmp(&a.rating).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))),
-        2 => v.sort_by(|a, b| b.created.cmp(&a.created)),
-        _ => v.sort_by_key(|r| r.name.to_lowercase()),
-    }
-    v.iter().map(|r| card(&s.lib, r)).collect()
-}
-
-/// `units`: original | metric | us.
-#[tauri::command]
-fn recipe(state: tauri::State<Shared>, id: u64, scale: f64, units: String) -> Result<Detail, String> {
-    let s = state.lock().unwrap();
-    let r = s.lib.recipe(id).ok_or(GONE)?;
-    let rows = r
-        .ingredient_lines()
-        .iter()
-        .map(|l| {
-            let (amount, text, heading) = ingredients::display_row(l, scale, units == "metric", units == "us");
-            Row { amount, text, heading }
-        })
-        .collect();
-    let calc = nutrition::calculate(r);
-    let total = r.nutrition.unwrap_or(calc.total);
-    Ok(Detail {
-        card: card(&s.lib, r),
-        description: r.description.clone(),
-        notes: r.notes.clone(),
-        source: r.source.clone(),
-        source_url: r.source_url.clone(),
-        prep_time: r.prep_time.clone(),
-        cook_time: r.cook_time.clone(),
-        servings: r.servings.clone(),
-        difficulty: r.difficulty.clone(),
-        rows,
-        steps: r.steps().iter().map(|t| step_pieces(&ingredients::strip_step_number(t))).collect(),
-        video: cooking::video_play_url(&r.video_url, 0),
-        per_serving: total.scaled(1.0 / r.servings_count()),
-        nutrition_edited: r.nutrition_edited,
-        nutrition_counted: calc.counted,
-        nutrition_skipped: calc.skipped,
-        flags: r.review_flags.clone(),
-    })
-}
-
-/// Change the library and save. This app is the only writer; a change is refused only while the
-/// library is damaged (DAMAGED) or from a newer version (READ_ONLY).
-pub(crate) fn mutate<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>) -> Result<T, String> {
-    // Any other change ends the grocery/pantry Undo, so Undo can't throw that change away.
-    mutate_keeping_undo(state, |st| {
-        let out = f(st)?;
-        st.undo = None;
-        Ok(out)
-    })
-}
-
-/// Swap the whole library (restore a backup or a saved version, start empty). The only way out of
-/// the damaged state: it refuses unless the damaged file has a verified copy, runs `f` while the
-/// store is still read-only (so no "before restore" snapshot of the empty placeholder is taken),
-/// then unlocks and saves. The damaged file is overwritten only because its copy exists, and it
-/// never reaches `.bak` (the save gate sees the copied stamp).
-pub(crate) fn replace_library<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>) -> Result<T, String> {
-    replace_library_then(state, f, |_| Ok(()))
-}
-
-/// [`replace_library`] plus a step that runs only after the library file was saved, under the same lock
-/// (a restore replaces the diary here, so a failed library save can't leave the diary replaced and the library not).
-pub(crate) fn replace_library_then<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>, after: impl FnOnce(&mut AppState) -> Result<(), String>) -> Result<T, String> {
-    // Not through mutate on purpose: mutate refuses while the library is damaged and this is the
-    // only way out of that state. It keeps mutate's single lock and gated save.
-    let mut guard = state.lock().unwrap();
-    let st = &mut *guard;
-    st.store.can_replace()?;
-    let out = f(st)?;
-    st.lib.format = model::LIBRARY_FORMAT; // a restored or rolled-back older library is saved in this build's format, so an older build opens it read-only (newer ones were refused by ensure_not_newer)
-    st.store.clear_damage();
-    st.undo = None;
-    st.store.save(&st.lib)?;
-    after(st)?;
-    Ok(out)
-}
-
-/// [`mutate`] for the removals that set up Undo, and for Undo itself.
-pub(crate) fn mutate_keeping_undo<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>) -> Result<T, String> {
-    let mut guard = state.lock().unwrap();
-    let st = &mut *guard;
-    st.store.check_unlocked()?;
-    let out = f(st)?;
-    st.store.save(&st.lib)?;
-    Ok(out)
-}
-
-/// Change the diary or profile and save the journal files that changed. It never touches
-/// library.json (no save, no library snapshot), and it doesn't check the library's lock: a damaged
-/// or newer library must not block the diary. Each journal file guards itself. When `f` or the save
-/// fails, the unsaved change is dropped from memory too (and the pending undo goes back), so what the
-/// next read shows is what is on disk.
-pub(crate) fn mutate_journal<T>(state: &Shared, f: impl FnOnce(&mut AppState) -> Result<T, String>) -> Result<T, String> {
-    let mut guard = state.lock().unwrap();
-    let st = &mut *guard;
-    let out = f(st).and_then(|v| st.journal.save_dirty().map(|_| v));
-    if out.is_err() {
-        st.journal.discard_unsaved();
-    }
-    out
-}
-
-/// What every recipe change ends with (the classic save_recipe_changes): a new modified time,
-/// and the tracker file refreshed when auto-send is on.
-pub(crate) fn touched(r: &mut Recipe, set: &model::Settings) {
-    r.modified = model::now_secs();
-    if set.tracker_auto_send && r.nutrition.is_some() && health::export(r, &set.tracker_service, &set.tracker_folder).is_ok() {
-        r.sent_to_tracker = Some(model::now_secs());
-    }
-}
-
-/// Change one recipe and save.
-fn change(state: &Shared, id: u64, f: impl FnOnce(&mut Recipe)) -> Result<(), String> {
-    mutate(state, |st| {
-        let set = st.lib.settings.clone();
-        let r = st.lib.recipe_mut(id).ok_or(GONE)?;
-        f(r);
-        touched(r, &set);
-        Ok(())
-    })
-}
-
-#[tauri::command]
-fn set_favorite(state: tauri::State<Shared>, id: u64, on: bool) -> Result<(), String> {
-    change(&state, id, |r| r.favorite = on)
-}
-
-#[tauri::command]
-fn set_rating(state: tauri::State<Shared>, id: u64, rating: u8) -> Result<(), String> {
-    change(&state, id, |r| r.rating = rating.min(5))
-}
-
-#[tauri::command]
-fn draft(state: tauri::State<Shared>, id: u64) -> Result<Draft, String> {
-    if id == 0 {
-        return Ok(Draft::default());
-    }
-    let s = state.lock().unwrap();
-    s.lib.recipe(id).map(Draft::of).ok_or_else(|| GONE.into())
-}
-
-/// Fix amounts, units, numbering and capitals (the classic "Tidy formatting"); nothing is saved.
-#[tauri::command]
-fn tidy(state: tauri::State<Shared>, draft: Draft) -> (Draft, Vec<String>) {
-    let short = state.lock().unwrap().lib.settings.unit_style_short;
-    let mut r = Recipe::default();
-    draft.apply(&mut r);
-    let changes = importer::tidy_recipe(&mut r, short);
-    (Draft { photo_seed: draft.photo_seed, ..Draft::of(&r) }, changes)
-}
-
-/// Save the edit page (id 0 = a new recipe) and return the recipe's id. Same steps as the
-/// classic app: blank name becomes "Untitled Recipe", nutrition is recalculated unless typed in
-/// by hand, import warnings are re-checked if there were any, and the tracker file is refreshed
-/// when auto-send is on.
-#[tauri::command]
-fn save_recipe(state: tauri::State<Shared>, id: u64, draft: Draft) -> Result<u64, String> {
-    mutate(&state, |st| {
-        let mut r = if id == 0 { Recipe::default() } else { st.lib.recipe(id).cloned().ok_or(GONE)? };
-        draft.apply(&mut r);
-        if r.name.trim().is_empty() {
-            r.name = "Untitled Recipe".into();
-        }
-        if !r.nutrition_edited {
-            r.nutrition = Some(nutrition::calculate(&r).total);
-        }
-        if !r.review_flags.is_empty() {
-            r.review_flags = importer::review_summary(&r);
-        }
-        touched(&mut r, &st.lib.settings);
-        Ok(if id == 0 {
-            st.lib.add_recipe(r)
-        } else {
-            *st.lib.recipe_mut(id).ok_or(GONE)? = r;
-            id
-        })
-    })
-}
-
-#[tauri::command]
-fn set_pinned(state: tauri::State<Shared>, id: u64, on: bool) -> Result<(), String> {
-    change(&state, id, |r| r.pinned = on)
-}
-
-/// Move to Trash, or back out of it.
-#[tauri::command]
-fn set_trashed(state: tauri::State<Shared>, ids: Vec<u64>, on: bool) -> Result<(), String> {
-    mutate(&state, |st| {
-        let t = model::now_secs();
-        for r in st.lib.recipes.iter_mut().filter(|r| ids.contains(&r.id)) {
-            r.in_trash = on;
-            r.modified = t;
-        }
-        Ok(())
-    })
-}
-
-/// Remove for good. Like the classic app: only recipes already in Trash go, a Version History
-/// snapshot is taken first, and a tombstone stops sync bringing them back.
-#[tauri::command]
-fn delete_forever(state: tauri::State<Shared>, ids: Vec<u64>) -> Result<usize, String> {
-    mutate(&state, |st| {
-        let ids: Vec<u64> = ids.into_iter().filter(|id| st.lib.recipe(*id).is_some_and(|r| r.in_trash)).collect();
-        if ids.is_empty() {
-            return Ok(0);
-        }
-        st.store.snapshot(&st.lib, "before deleting recipes")?;
-        let t = model::now_secs();
-        let gone: Vec<(String, u64)> = st.lib.recipes.iter().filter(|r| ids.contains(&r.id)).map(|r| (r.uid.clone(), t)).collect();
-        st.lib.tombstones.extend(gone);
-        st.lib.recipes.retain(|r| !ids.contains(&r.id));
-        Ok(ids.len())
-    })
-}
-
-#[tauri::command]
-fn duplicate(state: tauri::State<Shared>, id: u64) -> Result<u64, String> {
-    mutate(&state, |st| {
-        let mut copy = st.lib.recipe(id).cloned().ok_or(GONE)?;
-        copy.uid = String::new();
-        copy.name = format!("{} (copy)", copy.name);
-        copy.pinned = false;
-        copy.created = model::now_secs();
-        touched(&mut copy, &st.lib.settings);
-        Ok(st.lib.add_recipe(copy))
-    })
-}
-
-/// Nutrition typed in by hand (per serving), or `None` to go back to the calculated estimate.
-#[tauri::command]
-fn set_nutrition(state: tauri::State<Shared>, id: u64, per_serving: Option<Nutrients>) -> Result<(), String> {
-    change(&state, id, |r| match per_serving {
-        Some(n) => {
-            r.nutrition = Some(nutrition::hand_typed(&n, r.servings_count()));
-            r.nutrition_edited = true;
-        }
-        None => {
-            r.nutrition_edited = false;
-            r.nutrition = Some(nutrition::calculate(r).total);
-        }
-    })
-}
-
-#[tauri::command]
-fn add_meal(state: tauri::State<Shared>, recipe_id: u64, day: i32, kind: Option<MealType>) -> Result<(), String> {
-    mutate(&state, |st| {
-        let name = st.lib.recipe(recipe_id).ok_or(GONE)?.name.clone();
-        let kind = kind.unwrap_or_else(|| meals::free_kind(&st.lib.meals, day));
-        let id = st.lib.new_id();
-        st.lib.meals.push(model::Meal { id, day, kind, recipe_id: Some(recipe_id), name, modified: model::now_secs() });
-        Ok(())
-    })
-}
-
-/// What the page should tell the user about the library file, if anything. Recovered and replaced
-/// come once; damaged keeps coming until the user picks a way to recover.
-#[tauri::command]
-fn pending_notice(state: tauri::State<Shared>) -> Result<Option<NoticeView>, String> {
-    let mut s = state.lock().unwrap();
-    let main = storage::library_path(&s.store.dir).display().to_string();
-    let path = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_default();
-    Ok(s.store.take_notice().map(|n| match n {
-        storage::Notice::Recovered { kept } => NoticeView { kind: "recovered", file: main, kept: path(kept) },
-        storage::Notice::Replaced { kept } => NoticeView { kind: "replaced", file: main, kept: path(Some(kept)) },
-        storage::Notice::Damaged { file, kept } => NoticeView { kind: "damaged", file: path(Some(file)), kept: path(kept) },
-    }))
-}
+// The state, its save rules and the shared commands live in tiffin-commands (also built for the web).
+pub(crate) use tiffin_commands::{mutate, web_address, AppState, Shared};
+#[cfg(test)]
+pub(crate) use tiffin_commands::replace_library;
+#[cfg(test)] // only the tests change the diary directly now; its commands are shared
+pub(crate) use tiffin_commands::mutate_journal;
 
 /// The picture's bytes arrive as the raw request body (not a JSON number array); the `stem`
 /// header names the file. Returns the new file name in the photos folder.
@@ -582,13 +26,8 @@ async fn add_photo(state: tauri::State<'_, Shared>, request: tauri::ipc::Request
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("No picture was sent.".into());
     };
-    let stem = request.headers().get("stem").and_then(|v| v.to_str().ok()).unwrap_or("photo").to_lowercase();
-    let dir = {
-        let s = state.lock().unwrap();
-        s.store.check_unlocked()?;
-        storage::photos_dir(&s.store.dir)
-    };
-    storage::save_photo_bytes(bytes, &dir, &stem)
+    let stem = request.headers().get("stem").and_then(|v| v.to_str().ok()).unwrap_or("photo");
+    tiffin_commands::recipes::add_photo_bytes(&state, bytes, stem)
 }
 
 /// Whether Mica went on behind the window in `setup` (it can't on older Windows).
@@ -626,48 +65,15 @@ fn open_link(url: String) -> Result<(), String> {
     cooking::open_external(u).then_some(()).ok_or_else(|| "Couldn't open the browser.".into())
 }
 
-pub(crate) fn web_address(u: &str) -> bool {
-    (u.starts_with("https://") || u.starts_with("http://")) && !u.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
-}
-
 /// Photo file names are made by storage::photo_name: letters, digits, '-' and one ".jpg".
 fn safe_photo_name(name: &str) -> bool {
     !name.is_empty() && !name.contains("..") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
 }
 
 fn load_state(data_dir: PathBuf) -> AppState {
-    let journal = tracker::journal::Journal::open(tracker::journal::journal_dir(&data_dir));
-    let mut store = storage::Store::new(data_dir, false);
-    // Samples only for a true first run. A damaged file gives an empty placeholder in memory and no save at all.
-    let (mut lib, first_run) = match store.load() {
-        storage::LoadOutcome::Loaded { lib } => (lib, false),
-        storage::LoadOutcome::Missing => (model::sample_library(model::today()), true),
-        storage::LoadOutcome::Damaged => (Library::default(), false),
-        // A newer library stays in memory so browsing, cook mode and timers work; the store refuses every save.
-        storage::LoadOutcome::TooNew { lib } => (lib, false),
-    };
-    let cuisines = lib.ensure_cuisines();
-    let labels = model::assign_label_colors(&mut lib);
-    nutrition::set_my_foods(&lib.my_foods);
-    // Newer nutrition estimator: redo the saved estimates once (never ones typed in by hand), with a
-    // snapshot first so the old numbers can be brought back. `modified` stays as it is, so this device
-    // does not win every later sync conflict.
-    let mut estimates = false;
-    if store.problem.is_none() && lib.nutrition_estimator < nutrition::ESTIMATOR_VERSION {
-        // no snapshot, no rewrite: the old estimates stay and the next start tries again
-        if first_run || store.snapshot(&lib, "before updating nutrition estimates").is_ok() {
-            for r in lib.recipes.iter_mut().filter(|r| !r.nutrition_edited) {
-                r.nutrition = Some(nutrition::calculate(r).total);
-            }
-            lib.nutrition_estimator = nutrition::ESTIMATOR_VERSION;
-            estimates = true;
-        }
-    }
-    if (first_run || cuisines || labels || estimates) && store.problem.is_none() {
-        let _ = store.save(&lib);
-    }
+    let state = tiffin_commands::load_state(data_dir);
     remove_instance_file();
-    AppState { lib, store, undo: None, journal, unsaved: false }
+    state
 }
 
 /// The classic window kept a `instance-<user>.txt` (port and token of its listener) in the data
@@ -767,7 +173,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(LaunchNotes(notes))
-        .manage(foods::OffState::new(&data_dir))
+        .manage(tiffin_commands::foods::OffState::new(&data_dir))
         .manage(Mutex::new(load_state(data_dir)))
         // photo://<file name> serves pictures from the library's photos folder, and nothing else.
         .register_uri_scheme_protocol("photo", move |_ctx, req| {
@@ -797,140 +203,44 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            overview,
-            list,
-            recipe,
-            set_favorite,
-            set_rating,
-            draft,
-            tidy,
-            save_recipe,
+        .invoke_handler({
+            // one handler: the shared commands by name, everything else from this shell
+            type Invoke = tauri::ipc::Invoke<tauri::Wry>;
+            // gives the generated handler its argument type, which a plain `let` can't infer
+            fn typed(f: impl Fn(Invoke) -> bool + Send + Sync + 'static) -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
+                f
+            }
+            let shared = tiffin_commands::tauri_handler::<tauri::Wry>();
+            let local = typed(tauri::generate_handler![
+            foods_online::off_search,
+            foods_online::barcode_photo,
             add_photo,
-            pending_notice,
             open_link,
             mica,
             launch_notes,
             show_window,
-            set_pinned,
-            set_trashed,
-            delete_forever,
-            duplicate,
-            set_nutrition,
-            add_meal,
             update::check_update,
             update::install_update,
             update::set_unsaved,
             importing::import_url,
-            importing::import_text,
-            importing::check_lines,
-            importing::review_tidy,
-            importing::review_existing,
             importing::save_review,
             importing::take_inbox,
             importing::rules_overview,
-            importing::load_rules,
-            importing::use_builtin_rules,
             importing::rules_from_sync,
-            grocery::groceries,
-            grocery::grocery_preview,
-            grocery::add_recipe_to_list,
-            grocery::plan_preview,
-            grocery::add_plan_to_list,
-            grocery::add_item,
-            grocery::update_item,
-            grocery::remove_item,
-            grocery::new_list,
-            grocery::rename_list,
-            grocery::delete_list,
-            grocery::clear_items,
-            grocery::remove_pantry_items,
-            grocery::move_bought_to_pantry,
-            grocery::undo_groceries,
-            grocery::set_grocery_by_recipe,
-            pantry::pantry,
-            pantry::add_pantry,
-            pantry::update_pantry,
-            pantry::delete_pantry,
-            pantry::remove_expired,
-            pantry::remove_out_of_stock,
-            pantry::pantry_to_list,
-            pantry::set_pantry_sort,
-            settings::set_sidebar_order,
-            settings::set_launch_page,
-            meals::meals,
-            meals::update_meal,
-            meals::remove_meals,
-            meals::restore_meals,
-            menus::menus,
-            menus::new_menu,
-            menus::save_menu,
-            menus::delete_menu,
-            menus::restore_menu,
-            menus::apply_menu,
             settings::settings_info,
-            settings::set_settings,
             settings::sync_now,
             settings::auto_sync,
             settings::backup_now,
-            settings::backups,
             settings::delete_health_data,
-            settings::snapshots,
-            settings::take_snapshot,
-            settings::restore_backup,
-            settings::rollback,
-            settings::start_empty,
             settings::send_all_to_tracker,
             settings::setup_inbox,
             settings::open_folder,
-            settings::my_foods,
-            settings::save_my_food,
-            settings::delete_my_food,
             settings::label_lookup,
             settings::label_photo,
             settings::self_tests,
-            settings::merge_duplicates,
-            foods::off_search,
-            foods::barcode_photo,
-            foods::set_off_email,
-            foods::search_foods,
-            foods::food_detail,
-            foods::food_amount,
-            foods::food_preview,
-            foods::off_open,
-            foods::online_food_draft,
-            diary::diary_day,
-            diary::log_food,
-            diary::quick_add,
-            diary::quick_add_check,
-            diary::diary_foods,
-            diary::edit_entry,
-            diary::copy_entries,
-            diary::set_day_complete,
-            diary::planned_meals,
-            diary::log_planned,
-            diary::delete_entry,
-            diary::undo_diary,
-            exercise::exercise_activities,
-            exercise::exercise_estimate,
-            exercise::log_exercise,
-            exercise::save_activity,
-            exercise::edit_exercise,
-            exercise::delete_exercise,
-            exercise::delete_activity,
-            goals::targets_view,
-            goals::targets_preview,
-            goals::save_targets,
-            goals::accept_target_update,
-            body::body_view,
-            home::home_view,
-            reports::report_view,
-            body::log_measure,
-            body::undo_body,
-            body::edit_measurements,
-            body::save_measure,
-            body::archive_measure,
-        ])
+            ]);
+            move |invoke: Invoke| if tiffin_commands::NAMES.contains(&invoke.message.command()) { shared(invoke) } else { local(invoke) }
+        })
         .run(tauri::generate_context!())
         .expect("Tiffin couldn't start");
 }
@@ -938,6 +248,113 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiffin_commands::recipes::{in_category, overview_of, step_pieces};
+    use recipe_box::model::{Library, MealType, Nutrients};
+    use recipe_box::{nutrition, tracker};
+    use tiffin_commands::diary::{log_planned_in, planned_for, Pick};
+    use recipe_box::tracker::diary;
+
+    fn with_my_food(d: &std::path::Path) -> Shared {
+        let shared = Mutex::new(load_state(d.to_path_buf()));
+        shared.lock().unwrap().lib.my_foods.push(model::MyFood { id: 7, name: "Vanilla whey".into(), serving: "1 scoop".into(), serving_g: 31.0, per_serving: Nutrients { calories: Some(120.0), ..Default::default() }, ..Default::default() });
+        shared
+    }
+
+    fn lib_bytes(d: &std::path::Path) -> Vec<u8> {
+        std::fs::read(d.join("library.json")).unwrap()
+    }
+
+    /// The planner's Today (what MealDialog stores as Meal.day) is the diary's local day, not the UTC day (CR-01).
+    #[test]
+    fn planner_today_is_the_diary_local_day() {
+        // (label, UTC y-m-d, hour, minute, offset minutes, local day, month file)
+        let cases = [
+            ("behind", (2026, 11, 14), 4, 30, -300, "2026-11-13", "2026-11"),
+            ("ahead", (2026, 11, 13), 20, 0, 330, "2026-11-14", "2026-11"),
+            ("year-end", (2027, 1, 1), 3, 0, -300, "2026-12-31", "2026-12"),
+        ];
+        for (label, (y, m, dd), h, min, offset, want_day, want_month) in cases {
+            let d = tdir(&format!("planner-day-{label}"));
+            let shared = with_my_food(&d);
+            let utc = model::days_from_civil(y, m, dd) as i64 * 86400 + h * 3600 + min * 60;
+            let local = recipe_box::tracker::day::local_day(utc, offset);
+            assert_eq!(local.as_str(), want_day, "{label}: local day");
+            let planner = overview_of(&shared.lock().unwrap(), local.as_str()).unwrap().today;
+            assert_eq!(planner, diary::day_number(want_day).unwrap(), "{label}: planner Today is the diary's day number");
+            assert_ne!(planner, utc.div_euclid(86400) as i32, "{label}: the UTC day differs from the local day");
+            {
+                let mut st = shared.lock().unwrap();
+                let a = st.lib.recipes.iter().find(|r| r.nutrition.is_some_and(|n| n.calories.is_some()) && !r.uid.is_empty()).cloned().unwrap();
+                st.lib.meals = vec![model::Meal { id: 201, day: planner, kind: MealType::Lunch, recipe_id: Some(a.id), ..Default::default() }];
+            }
+            let listed = planned_for(&shared, local.as_str()).unwrap();
+            assert_eq!(listed.iter().map(|p| (p.meal_id, p.loggable)).collect::<Vec<_>>(), [(201, true)], "{label}: listed");
+            let r = log_planned_in(&shared, local.as_str(), &[Pick { meal_id: 201, servings: 1.0 }]).unwrap();
+            assert_eq!((r.count, r.view.day.as_str(), r.view.slots[1].entries.len()), (1, want_day, 1), "{label}: logged into the local day");
+            assert_eq!(shared.lock().unwrap().journal.month(want_month).unwrap().entries.len(), 1, "{label}: month {want_month}");
+            if label == "year-end" {
+                assert!(!d.join("journal").join("2027-01.json").exists(), "year-end: no 2027-01 month file");
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        let d = tdir("planner-day-invalid");
+        let shared = with_my_food(&d);
+        let err = overview_of(&shared.lock().unwrap(), "2026-02-30").err().unwrap();
+        assert!(err.contains("isn't a valid date"), "an invalid day is refused, never the UTC day: {err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A Meal.day saved before the fix keeps its number and its calendar date: nothing migrates it (data safety).
+    #[test]
+    fn stored_meal_days_keep_their_calendar_date() {
+        let d = tdir("planner-stored");
+        let shared = with_my_food(&d);
+        let lib_before = lib_bytes(&d);
+        let utc = model::days_from_civil(2026, 11, 14) as i64 * 86400 + 4 * 3600 + 30 * 60;
+        let old_today = utc.div_euclid(86400) as i32; // what the UTC "Today" stored at local 2026-11-13 23:30
+        shared.lock().unwrap().lib.meals = vec![model::Meal { id: 301, day: old_today, kind: MealType::Lunch, name: "Soup".into(), ..Default::default() }];
+        let planner = overview_of(&shared.lock().unwrap(), "2026-11-13").unwrap().today;
+        assert_ne!(planner, old_today);
+        assert_eq!(shared.lock().unwrap().lib.meals[0].day, old_today, "the stored day is untouched");
+        assert!(planned_for(&shared, "2026-11-13").unwrap().is_empty());
+        assert_eq!(planned_for(&shared, "2026-11-14").unwrap().iter().map(|p| p.meal_id).collect::<Vec<_>>(), [301]);
+        assert_eq!(lib_bytes(&d), lib_before, "reading the planner and the diary writes nothing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+
+    /// Command names `invoke` calls in a screen file: `invoke('name'` or `invoke<Type>('name'`.
+    fn invoked(src: &str) -> Vec<String> {
+        src.split("invoke").skip(1).filter_map(|rest| {
+            let at = rest.find("('")?;
+            let between = &rest[..at];
+            let typed = between.is_empty() || (between.starts_with('<') && between.ends_with('>') && !between.contains('\n'));
+            typed.then(|| rest[at + 2..].split('\'').next().unwrap_or_default().to_string())
+        }).collect()
+    }
+
+    /// Every command the window calls is answered by exactly one handler: the shared list
+    /// (tiffin-commands) or this shell's own. A command moved out of one and not into the other
+    /// would only show up as "not found" in the window.
+    #[test]
+    fn every_command_the_window_calls_has_one_handler() {
+        let me = include_str!("lib.rs");
+        let start = me.find("let local = typed(tauri::generate_handler![").unwrap();
+        let block = &me[start..start + me[start..].find("]);").unwrap()];
+        let local: Vec<&str> = block.lines().skip(1).map(|l| l.trim().trim_end_matches(',')).filter(|l| !l.is_empty() && !l.starts_with("//")).map(|l| l.rsplit("::").next().unwrap()).collect();
+        // read for real, to its end: show_window needs the desktop window, so it never leaves the shell's
+        // list, and right after the list's close comes the routing closure, so the read didn't stop early
+        assert!(local.contains(&"show_window") && local.contains(&"add_photo"), "the shell's list was read: {local:?}");
+        assert!(me[start + block.len()..].trim_start_matches("]);").trim_start().starts_with("move |invoke"), "the shell's list was read to its end");
+        for n in &local {
+            assert!(!tiffin_commands::NAMES.contains(n), "{n} is in both handlers");
+        }
+        let called: Vec<String> = [include_str!("../../src/lib/api.ts"), include_str!("../../src/main.ts")].iter().flat_map(|f| invoked(f)).collect();
+        assert!(called.len() > 100, "the screens' calls were read: {}", called.len());
+        for c in &called {
+            assert!(local.contains(&c.as_str()) || tiffin_commands::NAMES.contains(&c.as_str()), "the window calls {c}, which no handler answers");
+        }
+    }
 
     /// A fresh temp folder of its own for one test.
     fn tdir(name: &str) -> PathBuf {
@@ -1203,7 +620,7 @@ mod tests {
 
     #[test]
     fn step_pieces_mark_times_and_keep_all_text() {
-        let p = super::step_pieces("Simmer for 10 minutes, then rest 1 hour.");
+        let p = step_pieces("Simmer for 10 minutes, then rest 1 hour.");
         let joined: String = p.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(joined, "Simmer for 10 minutes, then rest 1 hour.");
         let t: Vec<_> = p.iter().filter_map(|x| x.seconds.map(|s| (x.text.as_str(), s))).collect();
@@ -1221,8 +638,8 @@ mod tests {
     #[test]
     fn category_match_takes_children_not_lookalikes() {
         let r = recipe_box::model::Recipe { categories: vec!["Desserts/Cakes".into()], ..Default::default() };
-        assert!(super::in_category(&r, "Desserts"));
-        assert!(super::in_category(&r, "Desserts/Cakes"));
-        assert!(!super::in_category(&r, "Dessert"));
+        assert!(in_category(&r, "Desserts"));
+        assert!(in_category(&r, "Desserts/Cakes"));
+        assert!(!in_category(&r, "Dessert"));
     }
 }

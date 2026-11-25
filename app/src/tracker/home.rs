@@ -160,19 +160,9 @@ fn weight_chart(j: &mut Journal, start: i32, range: BodyRange, today: &str, toda
     let w = trends::weight_change(j, goal_kg, &trends::day_text(start), today)?;
     let conv = |kg: f64| goals::in_unit(kg, unit);
     let points: Vec<Point> = w.points.iter().map(|&(day, ch)| Point { day, raw: None, trend: Some(conv(ch)) }).collect();
-    let goal = w.goal_change.map(conv);
-    let span = |vs: &[f64]| vs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    // the change line always shows 0, so it counts as data: a far goal then sits clear of the 0 line too
     let data: Vec<f64> = points.iter().filter_map(|p| p.trend).chain([0.0]).collect();
-    let (dlo, dhi) = span(&data);
-    // a far goal would squash the weigh-ins into a flat line: it stays in the scale only while they fill a fifth of the height
-    let far = goal.filter(|g| (dhi.max(*g) - dlo.min(*g)) > 5.0 * (dhi - dlo).max(1.0));
-    let (lo, hi) = if far.is_some() { (dlo, dhi) } else { span(&data.iter().copied().chain(goal).collect::<Vec<_>>()) };
-    let pad = 0.5_f64.max(0.05 * (hi - lo));
-    // off the scale, the goal line sits on the edge it lies beyond (clear of the 0 line and the weigh-ins), and its label points the way
-    let gap = pad.max(0.15 * (hi - lo));
-    let goal = goal.map(|g| if far.is_some() { if g < lo { lo - gap } else { hi + gap } } else { g });
-    let (y_min, y_max) = (goal.map_or(lo - pad, |g| g.min(lo - pad)), goal.map_or(hi + pad, |g| g.max(hi + pad)));
-    let arrow = far.map_or("", |g| if g < dlo { " \u{2193}" } else { " \u{2191}" });
+    let (y_min, y_max, goal, arrow) = body::goal_scale(&data, w.goal_change.map(conv), conv(1.0));
     let word = body::mass_word(unit);
     let name = body::range_name(range);
     let change = w.change_kg.map(|c| change_text(c, unit));
@@ -277,7 +267,7 @@ mod tests {
     use std::fs;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-home-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-home-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

@@ -124,7 +124,7 @@ mod tests {
             nutrition: Some(Nutrients { calories: Some(400.0), protein_g: Some(20.0), carbs_g: Some(50.0), fat_g: Some(10.0), fiber_g: None, sugar_g: Some(0.0), sodium_mg: Some(800.0) }),
             ..Default::default()
         };
-        let dir = std::env::temp_dir().join(format!("rb-health-export-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("rb-health-export-{}", crate::test_pid()));
         let folder = dir.to_string_lossy().to_string();
         let csv = export(&r, "Cronometer", &folder).unwrap();
         let text = std::fs::read_to_string(&csv).unwrap();

@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     #[test]
     fn inbox_skips_its_note_and_imports_claude_json() {
-        let dir = std::env::temp_dir().join(format!("rb-inbox-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("rb-inbox-{}", crate::test_pid()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(README_NAME), claude_instructions()).unwrap();
         fs::write(dir.join("chili.json"), r#"{"name":"Chili","ingredients":["1 lb beef"],"directions":["Cook."]}"#).unwrap();

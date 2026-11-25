@@ -1,0 +1,17 @@
+[package]
+name = "tiffin-helper"
+version = "0.1.0"
+edition = "2021"
+description = "The one server behind Tiffin on the web: fetches recipe pages and pictures the browser can't (CORS), keeps nothing."
+publish = false
+
+[dependencies]
+# The importer's own download rules: http(s) only, no local network on any redirect, size and redirect limits.
+recipe_box = { path = "../app" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -36,7 +36,7 @@ export function holdsUnsaved(dirty: () => boolean) {
 
 /** `manual` shows progress and failures (Settings > About); the launch check stays silent unless a release is found. */
 export async function checkForUpdate(manual: boolean) {
-  if (update.status === 'installing') return;
+  if (api.isWeb || update.status === 'installing') return;
   if (manual) update.status = 'checking';
   try {
     const info = await api.checkUpdate();
@@ -55,7 +55,7 @@ export async function checkForUpdate(manual: boolean) {
 
 /** Snapshot first, then install; Rust refuses while a page holds unsaved input. On Windows the app exits when the installer starts. */
 export async function installUpdate() {
-  if (update.unsaved || update.status === 'installing') return;
+  if (api.isWeb || update.unsaved || update.status === 'installing') return;
   update.status = 'installing';
   try {
     await api.installUpdate();

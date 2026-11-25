@@ -1,0 +1,243 @@
+/* Standalone zero-JS privacy page for Tiffin on the web.
+   Uses Tiffin's WCAG AA light and dark palette tokens with native color-scheme support. */
+
+:root {
+  color-scheme: light dark;
+
+  --page-light: #fff6e9;
+  --page-dark: #2b2118;
+  --card-light: #fffcf6;
+  --card-dark: #382b20;
+  --well-light: #f3ede3;
+  --well-dark: #33271d;
+  --ink-light: #2b2118;
+  --ink-dark: #fff6e9;
+  --ink-2-light: #5a4c3f;
+  --ink-2-dark: #c9bba8;
+  --accent-light: #b04630;
+  --accent-dark: #b04630;
+  --accent-press-light: #963a27;
+  --accent-press-dark: #963a27;
+  --accent-text-light: #a94530;
+  --accent-text-dark: #e8806a;
+  --rule-light: rgba(40, 30, 20, 0.12);
+  --rule-dark: rgba(255, 240, 225, 0.12);
+
+  --page: var(--page-light);
+  --card: var(--card-light);
+  --well: var(--well-light);
+  --ink: var(--ink-light);
+  --ink-2: var(--ink-2-light);
+  --accent: var(--accent-light);
+  --accent-press: var(--accent-press-light);
+  --accent-text: var(--accent-text-light);
+  --rule: var(--rule-light);
+
+  --font-text: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: var(--page-dark);
+    --card: var(--card-dark);
+    --well: var(--well-dark);
+    --ink: var(--ink-dark);
+    --ink-2: var(--ink-2-dark);
+    --accent: var(--accent-dark);
+    --accent-press: var(--accent-press-dark);
+    --accent-text: var(--accent-text-dark);
+    --rule: var(--rule-dark);
+  }
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --page: light-dark(var(--page-light), var(--page-dark));
+    --card: light-dark(var(--card-light), var(--card-dark));
+    --well: light-dark(var(--well-light), var(--well-dark));
+    --ink: light-dark(var(--ink-light), var(--ink-dark));
+    --ink-2: light-dark(var(--ink-2-light), var(--ink-2-dark));
+    --accent: light-dark(var(--accent-light), var(--accent-dark));
+    --accent-press: light-dark(var(--accent-press-light), var(--accent-press-dark));
+    --accent-text: light-dark(var(--accent-text-light), var(--accent-text-dark));
+    --rule: light-dark(var(--rule-light), var(--rule-dark));
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.6 var(--font-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 740px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.top {
+  border-bottom: 1px solid var(--rule);
+  padding: 18px 0;
+}
+
+.top-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 10px;
+}
+
+.logo {
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+@media (prefers-color-scheme: dark) {
+  .logo {
+    background: #fff6e9;
+    border-radius: 12px;
+    padding: 6px 8px;
+  }
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 14.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.back:hover {
+  background: var(--accent-press);
+}
+
+.doc {
+  padding: 40px 0 48px;
+}
+
+h1 {
+  margin: 0 0 14px;
+  font: 700 clamp(28px, 4vw, 36px) / 1.15 var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+.lead {
+  margin: 0 0 32px;
+  font-size: 17px;
+  color: var(--ink-2);
+}
+
+section {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule);
+}
+
+h2 {
+  margin: 0 0 12px;
+  font: 700 20px/1.25 var(--font-display);
+  letter-spacing: -0.012em;
+}
+
+p {
+  margin: 0 0 14px;
+  color: var(--ink-2);
+}
+
+strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+code {
+  font-size: 0.88em;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--well);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.cases {
+  margin: 18px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cases > div {
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+}
+
+.cases dt {
+  margin: 0 0 6px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.cases dd {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+ul {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--ink-2);
+}
+
+a {
+  color: var(--accent-text);
+  text-underline-offset: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+
+.foot {
+  border-top: 1px solid var(--rule);
+  padding: 20px 0 36px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.foot-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}

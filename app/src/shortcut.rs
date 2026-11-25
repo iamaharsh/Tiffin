@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn only_a_real_old_install_folder_is_accepted() {
-        let root = std::env::temp_dir().join(format!("rb old install {}", std::process::id()));
+        let root = crate::scratch_dir().join(format!("rb old install {}", crate::test_pid()));
         let _ = std::fs::remove_dir_all(&root);
         let (old, bare, data, mine) = (root.join("Recipe Box"), root.join("bare"), root.join("data"), root.join("Tiffin"));
         for d in [&old, &bare, &data, &mine] {
@@ -224,7 +224,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn only_old_shortcuts_are_removed() {
-        let d = std::env::temp_dir().join(format!("rb shortcut \u{2019}test {}", std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb shortcut \u{2019}test {}", crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let make = |name: &str, target: &str| {

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fff6e9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#2b2118" media="(prefers-color-scheme: dark)" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/privacy.css" />
+    <title>Privacy — Tiffin</title>
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap top-inner">
+        <a class="brand" href="/" aria-label="Back to Tiffin">
+          <img class="logo" src="/icons/tiffin-lockup.png" width="124" height="112" alt="" />
+        </a>
+        <a class="back" href="/">Open Tiffin</a>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <article class="doc">
+        <h1>Your data stays on your device.</h1>
+        <p class="lead">
+          Tiffin has no accounts, no cloud database, no analytics, no ads, and no tracking cookies.
+          Your recipes, photos, meal plans, groceries, pantry, food diary, calorie targets, exercise logs,
+          and body measurements live in your browser’s private storage (OPFS) on your device — never on a Tiffin server.
+          Small display preferences (such as theme, layout, and last backup time) stay in local browser storage on the same device.
+        </p>
+
+        <section aria-labelledby="when-heading">
+          <h2 id="when-heading">The only times anything leaves this device</h2>
+          <p>
+            Once loaded, Tiffin runs offline in WebAssembly. It makes an outside network request only when you
+            trigger one of the four actions below:
+          </p>
+
+          <dl class="cases">
+            <div>
+              <dt>1. Importing a recipe or nutrition page from a web address</dt>
+              <dd>
+                Browsers block web apps from reading other websites directly (CORS). When you paste a recipe
+                or product URL and ask Tiffin to import it, Tiffin sends <strong>only that web address</strong>
+                to Tiffin’s stateless helper (<code>helper.tiffin.fyi</code>) to download the page HTML — and,
+                if you save a recipe with a photo, to download that picture so it can be stored locally in your
+                browser. The helper keeps no database, saves no files, and writes no logs of addresses or content.
+              </dd>
+            </div>
+
+            <div>
+              <dt>2. Searching Open Food Facts by food name</dt>
+              <dd>
+                Typing in Foods or Diary searches the bundled 18,000-food database completely offline. Nothing is
+                sent while you type. Only when you press <strong>Search Online</strong> does Tiffin send your
+                search text and the contact email you provided (in Settings or when first prompted, as Open Food
+                Facts asks in its <code>User-Agent</code>) through the stateless helper to
+                <code>search.openfoodfacts.org</code>.
+              </dd>
+            </div>
+
+            <div>
+              <dt>3. Looking up a barcode on Open Food Facts</dt>
+              <dd>
+                Decoding a barcode from a photo or your camera runs completely offline in WebAssembly on your
+                device. In Foods and Diary, a scanned barcode checks your local foods and offline cache first,
+                and contacts Open Food Facts only when it isn’t already saved locally. When an uncached scan
+                looks up a product — or when you explicitly press <strong>Search Online</strong> or
+                <strong>Look Up</strong> a barcode or Open Food Facts link on a food form — your browser asks
+                <code>world.openfoodfacts.org</code> directly with your contact email in the
+                <code>X-User-Agent</code> header, with no cookies and no referrer.
+              </dd>
+            </div>
+
+            <div>
+              <dt>4. Opening an external link</dt>
+              <dd>
+                Clicking a recipe source link, video link, or desktop download link opens that address in a new
+                tab (<code>noopener, noreferrer</code>).
+              </dd>
+            </div>
+          </dl>
+        </section>
+
+        <section aria-labelledby="camera-heading">
+          <h2 id="camera-heading">Camera and permissions</h2>
+          <p>
+            Tiffin asks for camera access only when you explicitly choose camera barcode scanning.
+            Video frames are decoded locally in WebAssembly to read the barcode number and are never uploaded
+            or recorded. Tiffin never requests your microphone, location, or other device sensors (screen wake
+            lock is used only while Cook Mode is open so your screen stays awake).
+          </p>
+        </section>
+
+        <section aria-labelledby="storage-heading">
+          <h2 id="storage-heading">Storage, backups, and deleting your data</h2>
+          <ul>
+            <li>
+              <strong>Your browser holds your library:</strong> Recipes, diary entries, and automatic version
+              snapshots stay in Origin Private File System (OPFS) storage on this device. Tiffin asks the browser
+              to mark storage persistent so it isn’t cleared unexpectedly.
+            </li>
+            <li>
+              <strong>Portable one-file backups:</strong> In <strong>Settings → Backup &amp; Restore</strong>,
+              you can download everything as a single <code>.recipebox</code> file anytime, and restore it in
+              another browser or in the Tiffin desktop app.
+            </li>
+            <li>
+              <strong>Delete all health data in one step:</strong> In
+              <strong>Settings → Backup &amp; Restore</strong>, <strong>Delete All Health Data</strong> removes
+              your food diary, exercise logs, body measurements, profile, their snapshots, and health data inside
+              in-browser backups (leaving your recipes and any <code>.recipebox</code> files you already
+              downloaded intact).
+            </li>
+            <li>
+              <strong>Remove everything:</strong> Clear site data for <code>tiffin.fyi</code> in your browser’s
+              site settings at any time to erase all local files, preferences, and offline caches.
+            </li>
+          </ul>
+        </section>
+
+        <section aria-labelledby="sources-heading">
+          <h2 id="sources-heading">Self-hosting and data sources</h2>
+          <p>
+            The helper server is a single stateless Rust program you can run on your own server if you prefer.
+            Bundled nutrition data comes from USDA FoodData Central (public domain) and Health Canada’s Canadian
+            Nutrient File (Open Government Licence — Canada); online product lookups come from Open Food Facts
+            (ODbL).
+          </p>
+        </section>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot-inner">
+        <span>Tiffin — private recipe organizer &amp; food tracker</span>
+        <a href="/">Back to Tiffin</a>
+      </div>
+    </footer>
+  </body>
+</html>

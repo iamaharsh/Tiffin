@@ -1,6 +1,6 @@
 [package]
 name = "tiffin"
-version = "0.4.0"
+version = "0.5.0"
 description = "Tiffin: the desktop app (Tauri)"
 edition = "2021"
 
@@ -17,6 +17,8 @@ serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.12.5", features = [] }
 # All recipe logic, storage and nutrition come from the recipe_box crate in app/.
 recipe_box = { path = "../../app" }
+# the commands shared with the web version; `tauri` makes each one a Tauri command too
+tiffin-commands = { path = "../commands", features = ["tauri"] }
 tauri-plugin-single-instance = "2"
 # tauri::generate_context! emits serde_json for the plugins config (updater); tests also use it
 serde_json = "1"

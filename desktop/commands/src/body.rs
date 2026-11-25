@@ -13,20 +13,20 @@ use serde::Serialize;
 /// `text` is what was saved, for the toast; `drift` is the offer to update the target when the trend weight has moved (D-07);
 /// `view` is the refreshed Body page when the caller gave a range.
 #[derive(Serialize)]
-pub(crate) struct BodyLogged {
-    pub(crate) confirm: Option<String>,
-    pub(crate) text: String,
-    pub(crate) drift: Option<Drift>,
-    pub(crate) view: Option<BodyView>,
+pub struct BodyLogged {
+    pub confirm: Option<String>,
+    pub text: String,
+    pub drift: Option<Drift>,
+    pub view: Option<BodyView>,
 }
 
-pub(crate) fn view_of(shared: &Shared, range: BodyRange, today: &str) -> Result<BodyView, String> {
+pub fn view_of(shared: &Shared, range: BodyRange, today: &str) -> Result<BodyView, String> {
     body::body_view(&mut shared.lock().unwrap().journal, range, today)
 }
 
 /// Log one measurement and keep its undo. A weight is asked about once when it looks wrong, and a saved weight carries the drift offer.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn log_in(shared: &Shared, day: &str, today: &str, measure: &str, value: f64, unit: UnitIn, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
+pub fn log_in(shared: &Shared, day: &str, today: &str, measure: &str, value: f64, unit: UnitIn, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
     mutate_journal(shared, |st| {
         let logged = body::log(&mut st.journal, day, today, measure, value, unit, confirmed, model::now_secs())?;
         let saved = logged.undo.is_some();
@@ -43,7 +43,7 @@ pub(crate) fn log_in(shared: &Shared, day: &str, today: &str, measure: &str, val
 }
 
 /// Put back the last change (the Diary's undo slot, shared with food and exercise), then read the page.
-pub(crate) fn undo_in(shared: &Shared, range: BodyRange, today: &str) -> Result<BodyView, String> {
+pub fn undo_in(shared: &Shared, range: BodyRange, today: &str) -> Result<BodyView, String> {
     mutate_journal(shared, |st| {
         let u = st.journal.take_undo().ok_or(NO_UNDO)?;
         diary::undo(&mut st.journal, &u, model::now_secs())?;
@@ -52,7 +52,7 @@ pub(crate) fn undo_in(shared: &Shared, range: BodyRange, today: &str) -> Result<
 }
 
 /// Save or clear several measures of one day in one step with one undo. Weight asks once, as `log_in` does.
-pub(crate) fn edit_in(shared: &Shared, day: &str, today: &str, values: Vec<DayValue>, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
+pub fn edit_in(shared: &Shared, day: &str, today: &str, values: Vec<DayValue>, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
     mutate_journal(shared, |st| {
         let logged = body::set_day(&mut st.journal, day, today, &values, confirmed, model::now_secs())?;
         let saved = logged.undo.is_some();
@@ -70,7 +70,7 @@ pub(crate) fn edit_in(shared: &Shared, day: &str, today: &str, values: Vec<DayVa
 }
 
 /// Add one of the person's own measures, then read the page.
-pub(crate) fn save_in(shared: &Shared, name: &str, kind: MeasureKind, range: BodyRange, today: &str) -> Result<BodyView, String> {
+pub fn save_in(shared: &Shared, name: &str, kind: MeasureKind, range: BodyRange, today: &str) -> Result<BodyView, String> {
     mutate_journal(shared, |st| {
         body::save_measure(&mut st.journal, name, kind)?;
         body::body_view(&mut st.journal, range, today)
@@ -78,41 +78,35 @@ pub(crate) fn save_in(shared: &Shared, name: &str, kind: MeasureKind, range: Bod
 }
 
 /// Hide one of the person's own measures, or bring it back. Every value stays.
-pub(crate) fn archive_in(shared: &Shared, uid: &str, archived: bool, range: BodyRange, today: &str) -> Result<BodyView, String> {
+pub fn archive_in(shared: &Shared, uid: &str, archived: bool, range: BodyRange, today: &str) -> Result<BodyView, String> {
     mutate_journal(shared, |st| {
         body::archive_measure(&mut st.journal, uid, archived)?;
         body::body_view(&mut st.journal, range, today)
     })
 }
 
-#[tauri::command]
-pub(crate) fn body_view(state: tauri::State<Shared>, range: BodyRange, today: String) -> Result<BodyView, String> {
+pub fn body_view(state: &Shared, range: BodyRange, today: String) -> Result<BodyView, String> {
     view_of(&state, range, &today)
 }
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn log_measure(state: tauri::State<Shared>, day: String, today: String, measure: String, value: f64, unit: UnitIn, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
+pub fn log_measure(state: &Shared, day: String, today: String, measure: String, value: f64, unit: UnitIn, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
     log_in(&state, &day, &today, &measure, value, unit, confirmed, range)
 }
 
-#[tauri::command]
-pub(crate) fn undo_body(state: tauri::State<Shared>, range: BodyRange, today: String) -> Result<BodyView, String> {
+pub fn undo_body(state: &Shared, range: BodyRange, today: String) -> Result<BodyView, String> {
     undo_in(&state, range, &today)
 }
 
-#[tauri::command]
-pub(crate) fn edit_measurements(state: tauri::State<Shared>, day: String, today: String, values: Vec<DayValue>, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
+pub fn edit_measurements(state: &Shared, day: String, today: String, values: Vec<DayValue>, confirmed: bool, range: Option<BodyRange>) -> Result<BodyLogged, String> {
     edit_in(&state, &day, &today, values, confirmed, range)
 }
 
-#[tauri::command]
-pub(crate) fn save_measure(state: tauri::State<Shared>, name: String, kind: MeasureKind, range: BodyRange, today: String) -> Result<BodyView, String> {
+pub fn save_measure(state: &Shared, name: String, kind: MeasureKind, range: BodyRange, today: String) -> Result<BodyView, String> {
     save_in(&state, &name, kind, range, &today)
 }
 
-#[tauri::command]
-pub(crate) fn archive_measure(state: tauri::State<Shared>, uid: String, archived: bool, range: BodyRange, today: String) -> Result<BodyView, String> {
+pub fn archive_measure(state: &Shared, uid: String, archived: bool, range: BodyRange, today: String) -> Result<BodyView, String> {
     archive_in(&state, &uid, archived, range, &today)
 }
 
@@ -128,7 +122,7 @@ mod tests {
     const TODAY: &str = "2026-11-17";
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-desktop-body-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-desktop-body-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

@@ -10,42 +10,42 @@ use serde::{Deserialize, Serialize};
 
 /// The day after a log: the whole view, plus the name of the food that was added.
 #[derive(Serialize)]
-pub(crate) struct Logged {
-    pub(crate) view: DayView,
-    pub(crate) name: String,
+pub struct Logged {
+    pub view: DayView,
+    pub name: String,
 }
 
 /// The day after a delete or an edit: the whole view, plus the name of the entry.
 #[derive(Serialize)]
-pub(crate) struct Changed {
-    pub(crate) view: DayView,
-    pub(crate) name: String,
+pub struct Changed {
+    pub view: DayView,
+    pub name: String,
 }
 
-pub(crate) const NO_UNDO: &str = "Undo isn't available after another change.";
+pub const NO_UNDO: &str = "Undo isn't available after another change.";
 
 /// The day after an undo: `day` is the day the undone change was made on (the page says "Put back on {date}"); `view` is the day being viewed.
 #[derive(Serialize)]
-pub(crate) struct Undone {
-    pub(crate) day: String,
-    pub(crate) view: DayView,
+pub struct Undone {
+    pub day: String,
+    pub view: DayView,
 }
 
 /// After a copy or a planned-meal log: the viewed day, and how many entries were added.
 #[derive(Serialize)]
-pub(crate) struct Copied {
-    pub(crate) view: DayView,
-    pub(crate) count: usize,
+pub struct Copied {
+    pub view: DayView,
+    pub count: usize,
 }
 
 /// One planned meal the person ticked in Log Planned Meals, and the servings they ate.
 #[derive(Deserialize)]
-pub(crate) struct Pick {
-    meal_id: u64,
-    servings: f32,
+pub struct Pick {
+    pub meal_id: u64,
+    pub servings: f32,
 }
 
-pub(crate) fn view(st: &mut AppState, day: &str, today: &str) -> Result<DayView, String> {
+pub fn view(st: &mut AppState, day: &str, today: &str) -> Result<DayView, String> {
     let mut v = diary::day_view(&mut st.journal, day, today)?;
     if v.is_today {
         let n = diary::day_number(today)?;
@@ -60,7 +60,7 @@ fn day_of(shared: &Shared, day: &str, today: &str) -> Result<DayView, String> {
 
 /// Log `amount` of `unit` of the food `key` (a database food, My Food, opened online product or recipe).
 /// The food is resolved before the journal lock is taken, and nothing here reaches the network.
-pub(crate) fn log(shared: &Shared, off: &OffState, day: &str, today: &str, slot: MealType, key: &str, amount: f32, unit: &str) -> Result<Logged, String> {
+pub fn log(shared: &Shared, off: &OffState, day: &str, today: &str, slot: MealType, key: &str, amount: f32, unit: &str) -> Result<Logged, String> {
     let entry = diary::from_food(&crate::foods::detail_of(shared, off, key, false)?, amount, unit)?;
     let name = entry.name.clone();
     mutate_journal(shared, |st| {
@@ -71,7 +71,7 @@ pub(crate) fn log(shared: &Shared, off: &OffState, day: &str, today: &str, slot:
 }
 
 /// A quick add: calories, optional macros and a label. The crate checks the figures before anything is written.
-pub(crate) fn quick(shared: &Shared, day: &str, today: &str, slot: MealType, label: &str, calories: Option<f32>, protein: Option<f32>, carbs: Option<f32>, fat: Option<f32>) -> Result<Logged, String> {
+pub fn quick(shared: &Shared, day: &str, today: &str, slot: MealType, label: &str, calories: Option<f32>, protein: Option<f32>, carbs: Option<f32>, fat: Option<f32>) -> Result<Logged, String> {
     let entry = diary::quick(label, calories, protein, carbs, fat)?;
     let name = entry.name.clone();
     mutate_journal(shared, |st| {
@@ -83,7 +83,7 @@ pub(crate) fn quick(shared: &Shared, day: &str, today: &str, slot: MealType, lab
 
 /// What the add dialog lists: the day's planned recipes first, then recent and frequent foods for an empty box, and the ranked rows for what was typed.
 #[derive(Serialize)]
-pub(crate) struct DiaryFoods {
+pub struct DiaryFoods {
     planned: Vec<FoodRow>,
     recent: Vec<FoodRow>,
     frequent: Vec<FoodRow>,
@@ -96,7 +96,7 @@ pub(crate) struct DiaryFoods {
 }
 
 /// Local only: the bundled foods, My Foods, recipes and cached online products. The online products are read first so that lock is gone before `Shared` is taken.
-pub(crate) fn foods_for(shared: &Shared, off: &OffState, q: &str, today: &str, day: &str, slot: MealType) -> Result<DiaryFoods, String> {
+pub fn foods_for(shared: &Shared, off: &OffState, q: &str, today: &str, day: &str, slot: MealType) -> Result<DiaryFoods, String> {
     let online = crate::foods::online_foods(off, false);
     let (mine, recipes, mut history, planned) = {
         let mut guard = shared.lock().unwrap();
@@ -114,29 +114,25 @@ pub(crate) fn foods_for(shared: &Shared, off: &OffState, q: &str, today: &str, d
 }
 
 /// One day's meals and totals. `day` and `today` are the page's local days (`YYYY-MM-DD`).
-#[tauri::command]
-pub(crate) fn diary_day(state: tauri::State<Shared>, day: String, today: String) -> Result<DayView, String> {
+pub fn diary_day(state: &Shared, day: String, today: String) -> Result<DayView, String> {
     day_of(&state, &day, &today)
 }
 
-#[tauri::command]
-pub(crate) fn log_food(state: tauri::State<Shared>, off: tauri::State<OffState>, day: String, today: String, slot: MealType, key: String, amount: f32, unit: String) -> Result<Logged, String> {
+pub fn log_food(state: &Shared, off: &OffState, day: String, today: String, slot: MealType, key: String, amount: f32, unit: String) -> Result<Logged, String> {
     log(&state, &off, &day, &today, slot, &key, amount, &unit)
 }
 
-#[tauri::command]
-pub(crate) fn quick_add(state: tauri::State<Shared>, day: String, today: String, slot: MealType, label: String, calories: Option<f32>, protein: Option<f32>, carbs: Option<f32>, fat: Option<f32>) -> Result<Logged, String> {
+pub fn quick_add(state: &Shared, day: String, today: String, slot: MealType, label: String, calories: Option<f32>, protein: Option<f32>, carbs: Option<f32>, fat: Option<f32>) -> Result<Logged, String> {
     quick(&state, &day, &today, slot, &label, calories, protein, carbs, fat)
 }
 
 /// The warning to show beside a very large calorie figure, or nothing. Reads and writes nothing.
-#[tauri::command]
-pub(crate) fn quick_add_check(calories: Option<f32>) -> Result<Option<String>, String> {
+pub fn quick_add_check(calories: Option<f32>) -> Result<Option<String>, String> {
     Ok(diary::quick_add_warning(calories).map(String::from))
 }
 
 /// Delete an entry (it stays in the month file) and keep the undo.
-pub(crate) fn remove(shared: &Shared, day: &str, today: &str, uid: &str) -> Result<Changed, String> {
+pub fn remove(shared: &Shared, day: &str, today: &str, uid: &str) -> Result<Changed, String> {
     mutate_journal(shared, |st| {
         let (name, u) = diary::delete(&mut st.journal, day, uid, model::now_secs())?;
         st.journal.set_undo(u);
@@ -145,7 +141,7 @@ pub(crate) fn remove(shared: &Shared, day: &str, today: &str, uid: &str) -> Resu
 }
 
 /// Put back the last change. When the save fails the rollback gives the slot back, so it can be tried again.
-pub(crate) fn undo_last(shared: &Shared, day: &str, today: &str) -> Result<Undone, String> {
+pub fn undo_last(shared: &Shared, day: &str, today: &str) -> Result<Undone, String> {
     mutate_journal(shared, |st| {
         let u = st.journal.take_undo().ok_or(NO_UNDO)?;
         diary::undo(&mut st.journal, &u, model::now_secs())?;
@@ -154,7 +150,7 @@ pub(crate) fn undo_last(shared: &Shared, day: &str, today: &str) -> Result<Undon
 }
 
 /// Change an entry's amount, unit and meal against its frozen basis, and keep the undo.
-pub(crate) fn change(shared: &Shared, day: &str, today: &str, uid: &str, amount: f32, unit: &str, slot: MealType) -> Result<Changed, String> {
+pub fn change(shared: &Shared, day: &str, today: &str, uid: &str, amount: f32, unit: &str, slot: MealType) -> Result<Changed, String> {
     mutate_journal(shared, |st| {
         let (name, u) = diary::edit(&mut st.journal, day, uid, amount, unit, slot, model::now_secs())?;
         st.journal.set_undo(u);
@@ -163,7 +159,7 @@ pub(crate) fn change(shared: &Shared, day: &str, today: &str, uid: &str, amount:
 }
 
 /// Copy a day, or one meal of it, into `day` as new entries, and keep the undo. Nothing already in `day` is touched.
-pub(crate) fn copy_in(shared: &Shared, from: &str, day: &str, today: &str, slot: Option<MealType>) -> Result<Copied, String> {
+pub fn copy_in(shared: &Shared, from: &str, day: &str, today: &str, slot: Option<MealType>) -> Result<Copied, String> {
     mutate_journal(shared, |st| {
         let (count, u) = diary::copy(&mut st.journal, from, day, slot, model::now_secs())?;
         st.journal.set_undo(u);
@@ -172,7 +168,7 @@ pub(crate) fn copy_in(shared: &Shared, from: &str, day: &str, today: &str, slot:
 }
 
 /// Mark a day complete or not. The undo slot is left alone.
-pub(crate) fn mark_complete(shared: &Shared, day: &str, today: &str, complete: bool) -> Result<DayView, String> {
+pub fn mark_complete(shared: &Shared, day: &str, today: &str, complete: bool) -> Result<DayView, String> {
     mutate_journal(shared, |st| {
         diary::set_complete(&mut st.journal, day, complete)?;
         view(st, day, today)
@@ -180,7 +176,7 @@ pub(crate) fn mark_complete(shared: &Shared, day: &str, today: &str, complete: b
 }
 
 /// The meals planned for today. A recipe in the trash counts as gone.
-pub(crate) fn planned_for(shared: &Shared, today: &str) -> Result<Vec<PlannedMeal>, String> {
+pub fn planned_for(shared: &Shared, today: &str) -> Result<Vec<PlannedMeal>, String> {
     let st = shared.lock().unwrap();
     let lookup = |id: u64| st.lib.recipe(id).filter(|r| !r.in_trash).map(|r| (r.name.clone(), recipe_box::health::per_serving(r)));
     Ok(diary::planned(&st.lib.meals, diary::day_number(today)?, lookup))
@@ -188,7 +184,7 @@ pub(crate) fn planned_for(shared: &Shared, today: &str) -> Result<Vec<PlannedMea
 
 /// Log the picked planned meals into today in one batch (D-10). Each meal's recipe is resolved to its uid now and its per-serving values
 /// are frozen through the same recipe detail the add dialog uses. One undo step; any refused pick writes nothing.
-pub(crate) fn log_planned_in(shared: &Shared, today: &str, picks: &[Pick]) -> Result<Copied, String> {
+pub fn log_planned_in(shared: &Shared, today: &str, picks: &[Pick]) -> Result<Copied, String> {
     mutate_journal(shared, |st| {
         if picks.is_empty() {
             return Err("Pick at least one meal to log.".into());
@@ -211,43 +207,35 @@ pub(crate) fn log_planned_in(shared: &Shared, today: &str, picks: &[Pick]) -> Re
     })
 }
 
-#[tauri::command]
-pub(crate) fn copy_entries(state: tauri::State<Shared>, from: String, day: String, today: String, slot: Option<MealType>) -> Result<Copied, String> {
+pub fn copy_entries(state: &Shared, from: String, day: String, today: String, slot: Option<MealType>) -> Result<Copied, String> {
     copy_in(&state, &from, &day, &today, slot)
 }
 
-#[tauri::command]
-pub(crate) fn set_day_complete(state: tauri::State<Shared>, day: String, today: String, complete: bool) -> Result<DayView, String> {
+pub fn set_day_complete(state: &Shared, day: String, today: String, complete: bool) -> Result<DayView, String> {
     mark_complete(&state, &day, &today, complete)
 }
 
-#[tauri::command]
-pub(crate) fn planned_meals(state: tauri::State<Shared>, today: String) -> Result<Vec<PlannedMeal>, String> {
+pub fn planned_meals(state: &Shared, today: String) -> Result<Vec<PlannedMeal>, String> {
     planned_for(&state, &today)
 }
 
-#[tauri::command]
-pub(crate) fn log_planned(state: tauri::State<Shared>, today: String, picks: Vec<Pick>) -> Result<Copied, String> {
+pub fn log_planned(state: &Shared, today: String, picks: Vec<Pick>) -> Result<Copied, String> {
     log_planned_in(&state, &today, &picks)
 }
 
-#[tauri::command]
-pub(crate) fn edit_entry(state: tauri::State<Shared>, day: String, today: String, uid: String, amount: f32, unit: String, slot: MealType) -> Result<Changed, String> {
+pub fn edit_entry(state: &Shared, day: String, today: String, uid: String, amount: f32, unit: String, slot: MealType) -> Result<Changed, String> {
     change(&state, &day, &today, &uid, amount, &unit, slot)
 }
 
-#[tauri::command]
-pub(crate) fn delete_entry(state: tauri::State<Shared>, day: String, today: String, uid: String) -> Result<Changed, String> {
+pub fn delete_entry(state: &Shared, day: String, today: String, uid: String) -> Result<Changed, String> {
     remove(&state, &day, &today, &uid)
 }
 
-#[tauri::command]
-pub(crate) fn undo_diary(state: tauri::State<Shared>, day: String, today: String) -> Result<Undone, String> {
+pub fn undo_diary(state: &Shared, day: String, today: String) -> Result<Undone, String> {
     undo_last(&state, &day, &today)
 }
 
-#[tauri::command]
-pub(crate) fn diary_foods(state: tauri::State<Shared>, off: tauri::State<OffState>, q: String, today: String, day: String, slot: MealType) -> Result<DiaryFoods, String> {
+pub fn diary_foods(state: &Shared, off: &OffState, q: String, today: String, day: String, slot: MealType) -> Result<DiaryFoods, String> {
     foods_for(&state, &off, &q, &today, &day, slot)
 }
 
@@ -260,7 +248,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-desktop-diary-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-desktop-diary-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -427,64 +415,6 @@ mod tests {
         undo_last(&shared, "2026-03-10", "2026-03-10").unwrap();
         assert_eq!(day_of(&shared, "2026-03-10", "2026-03-10").unwrap().slots.iter().map(|s| s.entries.len()).sum::<usize>(), 0, "one undo removes both");
         assert_eq!(lib_bytes(&d), lib_before);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// The planner's Today (what MealDialog stores as Meal.day) is the diary's local day, not the UTC day (CR-01).
-    #[test]
-    fn planner_today_is_the_diary_local_day() {
-        // (label, UTC y-m-d, hour, minute, offset minutes, local day, month file)
-        let cases = [
-            ("behind", (2026, 11, 14), 4, 30, -300, "2026-11-13", "2026-11"),
-            ("ahead", (2026, 11, 13), 20, 0, 330, "2026-11-14", "2026-11"),
-            ("year-end", (2027, 1, 1), 3, 0, -300, "2026-12-31", "2026-12"),
-        ];
-        for (label, (y, m, dd), h, min, offset, want_day, want_month) in cases {
-            let d = tdir(&format!("planner-day-{label}"));
-            let shared = with_my_food(&d);
-            let utc = model::days_from_civil(y, m, dd) as i64 * 86400 + h * 3600 + min * 60;
-            let local = recipe_box::tracker::day::local_day(utc, offset);
-            assert_eq!(local.as_str(), want_day, "{label}: local day");
-            let planner = crate::overview_of(&shared.lock().unwrap(), local.as_str()).unwrap().today;
-            assert_eq!(planner, diary::day_number(want_day).unwrap(), "{label}: planner Today is the diary's day number");
-            assert_ne!(planner, utc.div_euclid(86400) as i32, "{label}: the UTC day differs from the local day");
-            {
-                let mut st = shared.lock().unwrap();
-                let a = st.lib.recipes.iter().find(|r| r.nutrition.is_some_and(|n| n.calories.is_some()) && !r.uid.is_empty()).cloned().unwrap();
-                st.lib.meals = vec![model::Meal { id: 201, day: planner, kind: MealType::Lunch, recipe_id: Some(a.id), ..Default::default() }];
-            }
-            let listed = planned_for(&shared, local.as_str()).unwrap();
-            assert_eq!(listed.iter().map(|p| (p.meal_id, p.loggable)).collect::<Vec<_>>(), [(201, true)], "{label}: listed");
-            let r = log_planned_in(&shared, local.as_str(), &[Pick { meal_id: 201, servings: 1.0 }]).unwrap();
-            assert_eq!((r.count, r.view.day.as_str(), r.view.slots[1].entries.len()), (1, want_day, 1), "{label}: logged into the local day");
-            assert_eq!(shared.lock().unwrap().journal.month(want_month).unwrap().entries.len(), 1, "{label}: month {want_month}");
-            if label == "year-end" {
-                assert!(!d.join("journal").join("2027-01.json").exists(), "year-end: no 2027-01 month file");
-            }
-            let _ = std::fs::remove_dir_all(&d);
-        }
-        let d = tdir("planner-day-invalid");
-        let shared = with_my_food(&d);
-        let err = crate::overview_of(&shared.lock().unwrap(), "2026-02-30").err().unwrap();
-        assert!(err.contains("isn't a valid date"), "an invalid day is refused, never the UTC day: {err}");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// A Meal.day saved before the fix keeps its number and its calendar date: nothing migrates it (data safety).
-    #[test]
-    fn stored_meal_days_keep_their_calendar_date() {
-        let d = tdir("planner-stored");
-        let shared = with_my_food(&d);
-        let lib_before = lib_bytes(&d);
-        let utc = model::days_from_civil(2026, 11, 14) as i64 * 86400 + 4 * 3600 + 30 * 60;
-        let old_today = utc.div_euclid(86400) as i32; // what the UTC "Today" stored at local 2026-11-13 23:30
-        shared.lock().unwrap().lib.meals = vec![model::Meal { id: 301, day: old_today, kind: MealType::Lunch, name: "Soup".into(), ..Default::default() }];
-        let planner = crate::overview_of(&shared.lock().unwrap(), "2026-11-13").unwrap().today;
-        assert_ne!(planner, old_today);
-        assert_eq!(shared.lock().unwrap().lib.meals[0].day, old_today, "the stored day is untouched");
-        assert!(planned_for(&shared, "2026-11-13").unwrap().is_empty());
-        assert_eq!(planned_for(&shared, "2026-11-14").unwrap().iter().map(|p| p.meal_id).collect::<Vec<_>>(), [301]);
-        assert_eq!(lib_bytes(&d), lib_before, "reading the planner and the diary writes nothing");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -6,7 +6,7 @@ use recipe_box::model::{self, Meal, Menu, MenuEntry};
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub(crate) struct EntryOut {
+pub struct EntryOut {
     #[serde(flatten)]
     entry: MenuEntry,
     label: Option<usize>,
@@ -15,18 +15,17 @@ pub(crate) struct EntryOut {
 }
 
 #[derive(Serialize)]
-pub(crate) struct MenuOut {
+pub struct MenuOut {
     id: u64,
     name: String,
     days: u32,
     entries: Vec<EntryOut>,
 }
 
-#[tauri::command]
-pub(crate) fn menus(state: tauri::State<Shared>) -> Vec<MenuOut> {
+pub fn menus(state: &Shared) -> Result<Vec<MenuOut>, String> {
     let s = state.lock().unwrap();
     let lib = &s.lib;
-    lib.menus
+    Ok(lib.menus
         .iter()
         .map(|m| MenuOut {
             id: m.id,
@@ -46,11 +45,10 @@ pub(crate) fn menus(state: tauri::State<Shared>) -> Vec<MenuOut> {
                 })
                 .collect(),
         })
-        .collect()
+        .collect())
 }
 
-#[tauri::command]
-pub(crate) fn new_menu(state: tauri::State<Shared>) -> Result<u64, String> {
+pub fn new_menu(state: &Shared) -> Result<u64, String> {
     mutate(&state, |st| {
         let id = st.lib.new_id();
         st.lib.menus.push(Menu { id, name: "New Menu".into(), days: 7, entries: vec![], modified: model::now_secs() });
@@ -59,8 +57,7 @@ pub(crate) fn new_menu(state: tauri::State<Shared>) -> Result<u64, String> {
 }
 
 /// Save the menu as edited (name, number of days, its recipes). 1 to 28 days, like the classic app.
-#[tauri::command]
-pub(crate) fn save_menu(state: tauri::State<Shared>, id: u64, name: String, days: u32, entries: Vec<MenuEntry>) -> Result<(), String> {
+pub fn save_menu(state: &Shared, id: u64, name: String, days: u32, entries: Vec<MenuEntry>) -> Result<(), String> {
     mutate(&state, |st| {
         let m = st.lib.menus.iter_mut().find(|m| m.id == id).ok_or("That menu isn't there any more.")?;
         let name = name.trim();
@@ -73,8 +70,7 @@ pub(crate) fn save_menu(state: tauri::State<Shared>, id: u64, name: String, days
 }
 
 /// Delete a menu (a Version History snapshot first); returns it so Undo can put it back.
-#[tauri::command]
-pub(crate) fn delete_menu(state: tauri::State<Shared>, id: u64) -> Result<Menu, String> {
+pub fn delete_menu(state: &Shared, id: u64) -> Result<Menu, String> {
     mutate(&state, |st| {
         let i = st.lib.menus.iter().position(|m| m.id == id).ok_or("That menu isn't there any more.")?;
         st.store.snapshot(&st.lib, "before deleting a menu")?;
@@ -82,8 +78,8 @@ pub(crate) fn delete_menu(state: tauri::State<Shared>, id: u64) -> Result<Menu, 
     })
 }
 
-#[tauri::command]
-pub(crate) fn restore_menu(state: tauri::State<Shared>, mut menu: Menu) -> Result<(), String> {
+pub fn restore_menu(state: &Shared, menu: Menu) -> Result<(), String> {
+    let mut menu = menu;
     mutate(&state, |st| {
         if st.lib.menus.iter().any(|m| m.id == menu.id) {
             menu.id = st.lib.new_id();
@@ -96,8 +92,7 @@ pub(crate) fn restore_menu(state: tauri::State<Shared>, mut menu: Menu) -> Resul
 
 /// Day 1 lands on `start`. Recipes on days past the menu's length are left out (they're hidden
 /// on the page too). Returns how many meals were added.
-#[tauri::command]
-pub(crate) fn apply_menu(state: tauri::State<Shared>, id: u64, start: i32) -> Result<usize, String> {
+pub fn apply_menu(state: &Shared, id: u64, start: i32) -> Result<usize, String> {
     mutate(&state, |st| {
         let m = st.lib.menus.iter().find(|m| m.id == id).ok_or("That menu isn't there any more.")?;
         let entries: Vec<MenuEntry> = m.entries.iter().filter(|e| e.day >= 1 && e.day <= m.days).cloned().collect();

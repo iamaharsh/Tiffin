@@ -156,9 +156,9 @@
     <span class="fillrow">
       <input id="food-lookup" name="lookup" bind:value={lookup} placeholder="https://… or 0123456789012" spellcheck="false" autocomplete="off" inputmode="url" />
       <button class="btn" disabled={!lookup.trim() || busy}>Look Up</button>
-      <button type="button" class="btn" disabled={busy} onclick={() => labelFile?.click()}>Read a Label Photo…</button>
+      {#if !api.isWeb}<button type="button" class="btn" disabled={busy} onclick={() => labelFile?.click()}>Read a Label Photo…</button>{/if}
     </span>
-    <input bind:this={labelFile} type="file" accept="image/*" hidden onchange={labelPhoto} />
+    {#if !api.isWeb}<input bind:this={labelFile} type="file" accept="image/*" hidden onchange={labelPhoto} />{/if}
     <p class="fine" class:warn={labelNote?.warn} role="status">{labelNote?.text ?? ''}</p>
     {#if draft.barcode}
       <p class="fine barcode">Barcode {draft.barcode}. Once saved, scanning it finds this food.

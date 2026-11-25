@@ -11,15 +11,18 @@
   import type { SavedVersion, SettingsInfo } from './api';
 
   type Tab = 'sync' | 'backup' | 'history' | 'trackers' | 'online' | 'claude' | 'appearance' | 'about';
-  let { tab = $bindable('sync'), onchanged, onerror, onnote }: {
+  let { tab = $bindable(api.isWeb ? 'backup' : 'sync'), onchanged, onbackup, onerror, onnote }: {
     tab?: Tab;
     /** the library itself changed (restore, rollback, sync) */
     onchanged: () => void;
+    /** a backup or persistence change completed (lets the web backup banner refresh) */
+    onbackup?: () => void;
     onerror: (m: string) => void;
     onnote: (m: string) => void;
   } = $props();
 
-  const tabs: [Tab, string, string][] = [
+  const DESKTOP_ONLY_TABS = new Set<Tab>(['sync', 'trackers', 'claude']);
+  const allTabs: [Tab, string, string][] = [
     ['sync', 'Sync', 'refresh'],
     ['backup', 'Backup & Restore', 'tray'],
     ['history', 'Version History', 'clock'],
@@ -29,8 +32,13 @@
     ['appearance', 'Appearance', 'moon'],
     ['about', 'About', 'book'],
   ];
+  const tabs = api.isWeb ? allTabs.filter(([id]) => !DESKTOP_ONLY_TABS.has(id)) : allTabs;
   let look: Theme = $state(savedTheme());
-  const looks: Record<Theme, string> = { system: 'Follow Windows', light: 'Light', dark: 'Dark' };
+  const looks: Record<Theme, string> = { system: api.isWeb ? 'Follow System' : 'Follow Windows', light: 'Light', dark: 'Dark' };
+  let storage: api.StorageStatus | null = $state(null);
+  let canInstall = $state(false);
+  let installingApp = $state(false);
+  let installNote = $state('');
   let info: SettingsInfo | null = $state(null);
   let folder = $state('');
   // A typed or chip-picked sync folder is lost unless Save & Sync Now is pressed; the other fields here save on blur or change.
@@ -57,11 +65,71 @@
       onerror(String(e));
     }
   }
+  async function loadStorage() {
+    if (!api.isWeb) return;
+    storage = await api.storageStatus();
+  }
+  async function askPersist() {
+    if (busy === 'persist') return;
+    busy = 'persist';
+    try {
+      const granted = await api.requestPersistentStorage();
+      await loadStorage();
+      onbackup?.();
+      onnote(granted ? 'Browser storage is now marked persistent.' : 'The browser didn’t mark storage as persistent. Download a backup file regularly to keep a safe copy.');
+    } finally {
+      busy = '';
+    }
+  }
+  function formatBackupDate(ts: number | null): string {
+    if (!ts) return 'No backup downloaded from this browser yet.';
+    return `Last downloaded backup: ${new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
+  }
+
+  $effect(() => {
+    if (api.isWeb && DESKTOP_ONLY_TABS.has(tab)) tab = 'backup';
+  });
   $effect(() => { untrack(load); });
+  $effect(() => {
+    if (!api.isWeb) return;
+    return api.subscribeInstall((ok) => {
+      canInstall = ok;
+    });
+  });
+
+  async function installWebApp() {
+    if (installingApp) return;
+    installingApp = true;
+    installNote = '';
+    try {
+      const outcome = await api.triggerInstall();
+      if (outcome === 'installed') {
+        installNote = 'Tiffin was installed or opened as an app.';
+      } else if (outcome === 'cancelled') {
+        installNote = 'Installation was canceled.';
+      } else if (outcome === 'error') {
+        installNote = 'Installation could not start in this browser.';
+      }
+    } finally {
+      installingApp = false;
+    }
+  }
+
+  $effect(() => {
+    if (!api.isWeb) return;
+    const onChange = () => {
+      loadStorage();
+    };
+    window.addEventListener('tiffin-storage-change', onChange);
+    return () => window.removeEventListener('tiffin-storage-change', onChange);
+  });
   $effect(() => {
     const t = tab;
     untrack(() => {
-      if (t === 'backup') api.backups().then((l) => (list = l), (e) => onerror(String(e)));
+      if (t === 'backup') {
+        api.backups().then((l) => (list = l), (e) => onerror(String(e)));
+        loadStorage();
+      }
       if (t === 'history') api.snapshots().then((l) => (list = l), (e) => onerror(String(e)));
     });
   });
@@ -144,7 +212,7 @@
     {@const i = info}
     {#key tab}
       <section class="pane" in:fade={{ duration: 160 }}>
-        {#if tab === 'sync'}
+        {#if tab === 'sync' && !api.isWeb}
           <h2>Keep your library the same on every device</h2>
           <p class="lead">Choose a folder your devices share (OneDrive, Dropbox, iCloud Drive or a network folder). Tiffin keeps one sync file there and merges changes both ways: the newest edit of each recipe wins, and favorites, ratings and categories travel with their recipe. Deleted recipes stay deleted. A snapshot is taken before every sync.</p>
           <div class="note">
@@ -171,13 +239,33 @@
           <p class="fine">Last synced: {i.last_sync ?? 'never'}</p>
         {:else if tab === 'backup'}
           <h2>Back up everything in one file</h2>
-          <p class="lead">Recipes, photos, favorites, categories, meal plan, menus, grocery lists, pantry and settings go into a single file in <code>{i.backups_dir}</code>. Your food diary, exercise, body measurements and profile are included too. Only the recipe library is copied to your sync folder. Your diary and body data are never put there.</p>
+          {#if api.isWeb}
+            <p class="lead">Recipes, photos, favorites, categories, meal plan, menus, grocery lists, pantry, settings, food diary, exercise, body measurements and profile download as a single <code>.recipebox</code> file you can restore here or in the Tiffin desktop app.</p>
+            {#if storage}
+              <div class="note">
+                <span class="caps">Browser storage</span>
+                {#if storage.persisted === true}
+                  <p class="st ok"><Icon name="check" size={16} /> Protected from automatic browser cleanup on this device.</p>
+                {:else if storage.persisted === false}
+                  <p class="st bad"><Icon name="warn" size={16} /> Browser storage isn’t marked persistent, so site data may be cleared when space runs low.</p>
+                {:else}
+                  <p class="st">Your library and diary are kept in private browser storage on this device.</p>
+                {/if}
+                <p class="fine">{formatBackupDate(storage.lastBackupAt)}</p>
+                {#if storage.persisted === false}
+                  <div class="row"><button type="button" class="btn small" aria-busy={busy === 'persist'} disabled={busy === 'persist'} onclick={askPersist}>{busy === 'persist' ? 'Asking…' : 'Ask Browser to Keep Data'}</button></div>
+                {/if}
+              </div>
+            {/if}
+          {:else}
+            <p class="lead">Recipes, photos, favorites, categories, meal plan, menus, grocery lists, pantry and settings go into a single file in <code>{i.backups_dir}</code>. Your food diary, exercise, body measurements and profile are included too. Only the recipe library is copied to your sync folder. Your diary and body data are never put there.</p>
+          {/if}
           <div class="row">
-            <button class="btn primary" disabled={busy === 'backup'} onclick={() => run('backup', api.backupNow, () => api.backups().then((l) => (list = l)))}>{busy === 'backup' ? 'Backing Up…' : 'Back Up Now'}</button>
-            <button class="btn" onclick={() => api.openFolder('backups').catch((e) => onerror(String(e)))}>Open Folder</button>
+            <button class="btn primary" disabled={busy === 'backup'} onclick={() => run('backup', api.backupNow, () => { api.backups().then((l) => (list = l)); loadStorage(); onbackup?.(); })}>{busy === 'backup' ? 'Backing Up…' : 'Back Up Now'}</button>
+            {#if !api.isWeb}<button class="btn" onclick={() => api.openFolder('backups').catch((e) => onerror(String(e)))}>Open Folder</button>{/if}
           </div>
           <h2 class="sub">Restore on this or a new device</h2>
-          <p class="lead">Pick a backup below or choose a backup file (from a USB stick, say). Your current library is saved to Version History first, so a restore can be undone.</p>
+          <p class="lead">{api.isWeb ? 'Pick a saved backup below or choose a .recipebox file from your device.' : 'Pick a backup below or choose a backup file (from a USB stick, say).'} Your current library is saved to Version History first, so a restore can be undone.</p>
           <div class="row">
             <button class="btn" onclick={() => backupFile?.click()}>Choose a Backup File…</button>
             <input bind:this={backupFile} type="file" accept=".recipebox" hidden onchange={chooseBackup} />
@@ -185,18 +273,24 @@
           {@render versions('backup')}
           <!-- disabled while any job runs: a backup already under way read the diary before the delete and would write it back -->
           <h2 class="sub">Delete your health data</h2>
-          <p class="lead">Removes your food diary, exercise, body measurements and profile from this PC, with their snapshots, and takes them out of your backups. Recipes, photos, My Foods and settings stay.</p>
+          <p class="lead">
+            {#if api.isWeb}
+              Removes your food diary, exercise, body measurements and profile from this browser, with their snapshots, and takes them out of backups kept in this browser (files you already downloaded aren’t affected). Recipes, photos, My Foods and settings stay.
+            {:else}
+              Removes your food diary, exercise, body measurements and profile from this PC, with their snapshots, and takes them out of your backups. Recipes, photos, My Foods and settings stay.
+            {/if}
+          </p>
           <div class="row"><button class="btn danger" disabled={busy !== ''} onclick={() => (askErase = true)}>{busy === 'erase' ? 'Deleting…' : 'Delete All Health Data…'}</button></div>
         {:else if tab === 'history'}
           <h2>Roll back to an earlier version</h2>
-          <p class="lead">Snapshots are kept automatically: every 10 minutes of changes, and before imports, merges, syncs, restores, updates and deletions. Rolling back saves the current version first.</p>
+          <p class="lead">Snapshots are kept automatically: every 10 minutes of changes, and before {api.isWeb ? 'imports, merges, restores and deletions' : 'imports, merges, syncs, restores, updates and deletions'}. Rolling back saves the current version first.</p>
           <p class="fine">Rolling back changes recipes and settings only. It doesn’t change your food diary.</p>
           <div class="row"><button class="btn" onclick={() => run('', async () => { await api.takeSnapshot(); list = await api.snapshots(); return 'Snapshot saved'; })}>Take a Snapshot Now</button></div>
           <div class="table">
             <div class="tr now"><span><strong>Now</strong><em>your library as it is</em></span><span class="num">{i.recipes} recipes, {i.favorites} favorites</span><span class="cur">Current</span></div>
           </div>
           {@render versions('history')}
-        {:else if tab === 'trackers'}
+        {:else if tab === 'trackers' && !api.isWeb}
           <h2>Send recipes to a health tracker</h2>
           <p class="lead">Tiffin writes each recipe’s per-serving nutrition (and its ingredient list) as a file your tracker can import. In Cronometer, add it as a Custom Food or paste the ingredient list into its recipe importer.</p>
           <div class="two">
@@ -215,7 +309,7 @@
           </div>
         {:else if tab === 'online'}
           <h2>Search more foods online</h2>
-          <p class="lead">Tiffin searches the foods stored on this PC first. Search Online and barcode lookups also ask Open Food Facts, which asks apps to include a contact email. Tiffin sends it only to Open Food Facts, and only when you search online. If you remove it, Tiffin asks again the next time you search online.</p>
+          <p class="lead">Tiffin searches the foods stored {api.isWeb ? 'in this browser' : 'on this PC'} first. Search Online and barcode lookups also ask Open Food Facts, which asks apps to include a contact email. Tiffin sends it only to Open Food Facts, and only when you search online. If you remove it, Tiffin asks again the next time you search online.</p>
           <form class="stack" novalidate onsubmit={(e) => { e.preventDefault(); saveEmail(email); }}>
             <label class="field narrow">Contact email
               <input bind:value={email} name="email" type="email" autocomplete="email" spellcheck="false" placeholder="you@example.com" aria-invalid={emailProblem ? 'true' : undefined} aria-describedby={emailProblem ? 'off-email-problem' : undefined} />
@@ -226,7 +320,7 @@
               <button type="button" class="btn" disabled={!i.off_email} onclick={() => saveEmail('')}>Remove email</button>
             </div>
           </form>
-        {:else if tab === 'claude'}
+        {:else if tab === 'claude' && !api.isWeb}
           <h2>Send recipes from Claude</h2>
           <p class="lead">Ask Claude for a recipe, then say “save it to Tiffin”. Claude drops it in a folder this app watches, and it shows up for a quick review within seconds.</p>
           <ol class="steps">
@@ -261,7 +355,7 @@
           <details><summary>What the instructions say</summary><pre class="selectable">{i.instructions}</pre></details>
         {:else if tab === 'appearance'}
           <h2>Choose how Tiffin looks</h2>
-          <p class="lead">Follow Windows switches between light and dark when Windows does. Your choice is kept on this computer.</p>
+          <p class="lead">{api.isWeb ? 'Follow System switches between light and dark with your device. Your choice is kept in this browser.' : 'Follow Windows switches between light and dark when Windows does. Your choice is kept on this computer.'}</p>
           <div class="row">
             <Segmented label="Appearance" options={['system', 'light', 'dark'] as Theme[]} value={look} onchange={(t) => { look = t; chooseTheme(t); }}>
               {#snippet item(t)}{looks[t]}{/snippet}
@@ -270,41 +364,73 @@
         {:else}
           <div class="about-logo"><Logo width={160} /></div>
           <h2 class="about-h">Tiffin {i.version}</h2>
-          <p class="lead">Your library lives outside the program folder, and a snapshot is taken whenever a new version first opens it, so updates and reinstalls can’t remove your recipes, favorites or collections.</p>
-          <h2 class="sub">Updates</h2>
-          <div class="upd" role="status">
-            {#if update.status === 'checking'}
-              <p class="st"><span class="spin"><Icon name="refresh" size={16} /></span> Checking for updates…</p>
-            {:else if update.status === 'current'}
-              <p class="st ok"><Icon name="check" size={16} /> Tiffin {i.version} is up to date.</p>
-              <p class="fine soft">Checked {update.checked}.</p>
-            {:else if update.status === 'checkfailed'}
-              <p class="st bad" role="alert"><Icon name="warn" size={16} /> Couldn’t check for updates: {update.reason}.</p>
-            {:else if update.status === 'available'}
-              <p class="st acc"><Icon name="refresh" size={16} /> Tiffin {update.info?.version} is available.</p>
-              {#if update.unsaved}<p class="fine">Finish your edit to install.</p>{/if}
-            {:else if update.status === 'installing'}
-              <p class="st"><span class="spin"><Icon name="refresh" size={16} /></span> Backing up your library, then installing Tiffin {update.info?.version}. Tiffin restarts when it’s done.</p>
-            {:else if update.status === 'failed'}
-              <p class="st bad" role="alert"><Icon name="warn" size={16} /> Update couldn’t install: {update.reason}.</p>
-            {:else}
-              <p class="st">Tiffin {i.version} is installed.</p>
+          {#if api.isWeb}
+            <p class="lead">Your library and food diary live in this browser’s private storage on your device — never on a Tiffin server. Snapshots are kept automatically, and you can download a full backup file anytime.</p>
+            <div class="row">
+              <a class="btn" href="/privacy/" target="_blank" rel="noopener">Read Privacy Policy <Icon name="out" size={13} /></a>
+            </div>
+            {#if canInstall || installingApp || installNote}
+              <h2 class="sub">Install app</h2>
+              <div class="stack">
+                {#if canInstall || installingApp}
+                  <p class="lead">Install Tiffin on this device for offline access and its own app window.</p>
+                  <div class="row">
+                    <button type="button" class="btn primary" aria-busy={installingApp} aria-disabled={installingApp} onclick={installWebApp}>
+                      {installingApp ? 'Installing…' : 'Install Tiffin'}
+                    </button>
+                  </div>
+                {/if}
+                <p class="fine" role="status">{installNote}</p>
+              </div>
             {/if}
-          </div>
-          <div class="row">
-            {#if update.status === 'checkfailed'}
-              <button class="btn" onclick={() => checkForUpdate(true)}>Try again</button>
-            {:else if update.status === 'available'}
-              <button class="btn" onclick={() => (update.whatsNew = true)}>What’s new</button>
-              <button class="btn primary" aria-disabled={update.unsaved} onclick={installUpdate}>Install and restart</button>
-            {:else if update.status === 'failed'}
-              <button class="btn" onclick={installUpdate}>Try again</button>
-            {:else if update.status === 'installing'}
-              <!-- no buttons while the installer runs -->
-            {:else}
-              <button class="btn" disabled={update.status === 'checking'} onclick={() => checkForUpdate(true)}>Check for updates</button>
-            {/if}
-          </div>
+            <h2 class="sub">Desktop app</h2>
+            <p class="lead">Prefer a native Windows app with folder sync, label OCR, and a Claude inbox? Move your library between desktop and web anytime with a <code>.recipebox</code> backup file.</p>
+            <div class="row">
+              <a class="btn" href="https://github.com/iamaharsh/Tiffin/releases/latest" target="_blank" rel="noopener noreferrer">Download for Windows <Icon name="out" size={13} /></a>
+            </div>
+          {:else}
+            <p class="lead">Your library lives outside the program folder, and a snapshot is taken whenever a new version first opens it, so updates and reinstalls can’t remove your recipes, favorites or collections.</p>
+            <h2 class="sub">Tiffin on the web</h2>
+            <p class="lead">Use Tiffin in any modern browser at <code>tiffin.fyi</code> — same offline rules, kept privately in browser storage, and compatible with your <code>.recipebox</code> backups.</p>
+            <div class="row">
+              <button type="button" class="btn" onclick={() => api.openLink('https://tiffin.fyi').catch((e) => onerror(String(e)))}>Open tiffin.fyi <Icon name="out" size={13} /></button>
+              <button type="button" class="btn ghost" onclick={() => api.openLink('https://tiffin.fyi/privacy/').catch((e) => onerror(String(e)))}>Privacy policy <Icon name="out" size={13} /></button>
+            </div>
+            <h2 class="sub">Updates</h2>
+            <div class="upd" role="status">
+              {#if update.status === 'checking'}
+                <p class="st"><span class="spin"><Icon name="refresh" size={16} /></span> Checking for updates…</p>
+              {:else if update.status === 'current'}
+                <p class="st ok"><Icon name="check" size={16} /> Tiffin {i.version} is up to date.</p>
+                <p class="fine soft">Checked {update.checked}.</p>
+              {:else if update.status === 'checkfailed'}
+                <p class="st bad" role="alert"><Icon name="warn" size={16} /> Couldn’t check for updates: {update.reason}.</p>
+              {:else if update.status === 'available'}
+                <p class="st acc"><Icon name="refresh" size={16} /> Tiffin {update.info?.version} is available.</p>
+                {#if update.unsaved}<p class="fine">Finish your edit to install.</p>{/if}
+              {:else if update.status === 'installing'}
+                <p class="st"><span class="spin"><Icon name="refresh" size={16} /></span> Backing up your library, then installing Tiffin {update.info?.version}. Tiffin restarts when it’s done.</p>
+              {:else if update.status === 'failed'}
+                <p class="st bad" role="alert"><Icon name="warn" size={16} /> Update couldn’t install: {update.reason}.</p>
+              {:else}
+                <p class="st">Tiffin {i.version} is installed.</p>
+              {/if}
+            </div>
+            <div class="row">
+              {#if update.status === 'checkfailed'}
+                <button class="btn" onclick={() => checkForUpdate(true)}>Try again</button>
+              {:else if update.status === 'available'}
+                <button class="btn" onclick={() => (update.whatsNew = true)}>What’s new</button>
+                <button class="btn primary" aria-disabled={update.unsaved} onclick={installUpdate}>Install and restart</button>
+              {:else if update.status === 'failed'}
+                <button class="btn" onclick={installUpdate}>Try again</button>
+              {:else if update.status === 'installing'}
+                <!-- no buttons while the installer runs -->
+              {:else}
+                <button class="btn" disabled={update.status === 'checking'} onclick={() => checkForUpdate(true)}>Check for updates</button>
+              {/if}
+            </div>
+          {/if}
           <h2 class="sub">Data sources</h2>
           <p class="lead">Food, nutrient and activity data in Tiffin comes from these sources, credited as each one asks.</p>
           <ul class="sources">
@@ -361,7 +487,7 @@
     {#if c.kind === 'backup' && c.diary}
       <p style="margin:0;color:var(--ink)">Restore {c.label}. What should come back?</p>
       <div class="opts" role="radiogroup" aria-label="What to restore">
-        <label class="check opt"><input type="radio" name="scope" value="recipes" bind:group={scope} /> <span><b>Recipes and library only</b><span class="fine">Recipes, photos, meal plan, pantry and settings. Your food diary, exercise and body data on this PC are not touched.</span></span></label>
+        <label class="check opt"><input type="radio" name="scope" value="recipes" bind:group={scope} /> <span><b>Recipes and library only</b><span class="fine">Recipes, photos, meal plan, pantry and settings. Your food diary, exercise and body data {api.isWeb ? 'in this browser' : 'on this PC'} are not touched.</span></span></label>
         <label class="check opt"><input type="radio" name="scope" value="everything" bind:group={scope} /> <span><b>Everything, including the food diary</b><span class="fine">Also replaces your diary, exercise, body measurements and profile with the ones in this backup. Your current diary is kept first, so you can switch back.</span></span></label>
       </div>
       <p class="fine">Your current library is saved to Version History first, so you can switch back.</p>
@@ -387,7 +513,11 @@
 
 {#if askErase}
   <Dialog title="Delete All Health Data?" onclose={() => (askErase = false)}>
-    <p style="margin:0;color:var(--ink)">Your food diary, exercise, body measurements and profile are deleted from this PC, with their snapshots, and taken out of every backup in <code>{info?.backups_dir}</code>.</p>
+    {#if api.isWeb}
+      <p style="margin:0;color:var(--ink)">Your food diary, exercise, body measurements and profile are deleted from this browser, with their snapshots, and taken out of backups kept in this browser (files you already downloaded aren’t affected).</p>
+    {:else}
+      <p style="margin:0;color:var(--ink)">Your food diary, exercise, body measurements and profile are deleted from this PC, with their snapshots, and taken out of every backup in <code>{info?.backups_dir}</code>.</p>
+    {/if}
     <p class="fine">This can’t be undone. Recipes, photos, My Foods and settings stay, in the library and in the backups.</p>
     {#snippet actions()}
       <button class="btn" onclick={() => (askErase = false)}>Cancel</button>
@@ -426,8 +556,14 @@
   .sources li { display: flex; flex-direction: column; gap: 2px; }
   .sources strong { font-weight: 600; }
   .credit { font-style: italic; }
-  .note { display: flex; flex-direction: column; gap: 4px; padding: 16px; border-radius: 12px; background: var(--well); }
+  .note { display: flex; flex-direction: column; gap: 6px; padding: 16px; border-radius: 12px; background: var(--well); }
   .note p { margin: 0; color: var(--ink-2); }
+  .note .st { color: var(--ink); }
+  .note .st.ok { color: var(--olive-text); }
+  .note .st.bad { color: var(--warn); }
+  .note .row { margin-top: 4px; }
+  .note .btn { background: var(--card); box-shadow: inset 0 0 0 1px var(--rule-strong); }
+  .note .btn:hover { background: var(--page); }
   .opts { display: flex; flex-direction: column; gap: 12px; }
   .check.opt { align-items: flex-start; }
   .check.opt > span { display: flex; flex-direction: column; gap: 2px; }
@@ -452,12 +588,12 @@
   .chip:hover { filter: brightness(0.97); }
   .check { display: flex; align-items: flex-start; gap: 9px; font-size: 14px; }
   .check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 2px 0 0; flex: none; }
-  .btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 16px; border-radius: 9px; font-size: 14px; font-weight: 500; background: var(--well); box-shadow: inset 0 0 0 1px var(--rule); transition: background-color 120ms ease-out, transform 100ms ease-out; }
-  .btn:hover:not(:disabled) { background: var(--rule); }
-  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 16px; border-radius: 9px; font-size: 14px; font-weight: 500; color: var(--ink); text-decoration: none; background: var(--well); box-shadow: inset 0 0 0 1px var(--rule); transition: background-color 120ms ease-out, transform 100ms ease-out; }
+  .btn:hover:not(:disabled):not([aria-disabled='true']) { background: var(--rule); }
+  .btn:active:not(:disabled):not([aria-disabled='true']) { transform: scale(0.97); }
   .btn:disabled { opacity: 0.55; }
   .btn.primary { color: #fff; background: var(--accent); box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15); }
-  .btn.primary:hover:not(:disabled) { background: var(--accent-press); }
+  .btn.primary:hover:not(:disabled):not([aria-disabled='true']) { background: var(--accent-press); }
   .btn.danger { color: var(--on-heart); background: var(--heart); box-shadow: none; }
   .btn.danger:hover:not(:disabled) { background: var(--heart); filter: brightness(0.94); }
   .btn.ghost { background: none; box-shadow: none; color: var(--accent-text); }

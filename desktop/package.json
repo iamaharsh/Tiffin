@@ -9,7 +9,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
-    "check:ui": "node tools/body-dialogs-check.mjs && node tools/chart-check.mjs && node tools/contrast-check.mjs && node tools/segmented-check.mjs && node tools/sidebar-check.mjs"
+    "check:ui": "node tools/body-dialogs-check.mjs && node tools/chart-check.mjs && node tools/contrast-check.mjs && node tools/segmented-check.mjs && node tools/sidebar-check.mjs && node tools/timers-check.mjs",
+    "check:web": "node tools/web-security-check.mjs",
+    "dev:web": "vite --config vite.web.config.ts",
+    "build:web": "vite build --config vite.web.config.ts",
+    "preview:web": "vite preview --config vite.web.config.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
@@ -23,6 +27,7 @@
     "vite": "^8.3.6"
   },
   "dependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2",
     "@tauri-apps/api": "^2.12.4",
     "d3-scale": "4.0.3"
   }

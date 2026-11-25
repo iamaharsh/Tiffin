@@ -1,5 +1,5 @@
 // Light, dark or Follow Windows, remembered on this computer. The page reads data-theme, and the window call keeps the title bar and Mica in step (G-02.1-8).
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { setWindowTheme } from './transport'
 
 export type Theme = 'system' | 'light' | 'dark'
 
@@ -16,7 +16,7 @@ export function savedTheme(): Theme {
 export function applyTheme(t: Theme): Promise<void> {
   document.documentElement.dataset.theme = t === 'system' ? (query.matches ? 'dark' : 'light') : t
   // The page is already themed, so a refused or missing window call only leaves the title bar on the Windows setting and must never stop start-up.
-  return Promise.resolve().then(() => getCurrentWindow().setTheme(t === 'system' ? null : t)).catch(() => {})
+  return setWindowTheme(t === 'system' ? null : t)
 }
 
 export function chooseTheme(t: Theme): Promise<void> {

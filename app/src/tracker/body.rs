@@ -712,8 +712,28 @@ pub(crate) fn range_name(range: BodyRange) -> &'static str {
     }
 }
 
+/// The y range of a chart of `data` with a goal line: (y_min, y_max, where the goal line goes, an arrow for its label).
+/// A far goal would squash the data into a flat line, so it stays in the scale only while the data fill a fifth of the
+/// height; past that the line sits on the edge the goal lies beyond, clear of the data, and its label points the way.
+/// `min_span` is 1 kg in the chart's unit, so kilograms and pounds draw the same picture. No data: the goal alone, padded, or 0 to 1.
+pub(crate) fn goal_scale(data: &[f64], goal: Option<f64>, min_span: f64) -> (f64, f64, Option<f64>, &'static str) {
+    let span = |vs: &mut dyn Iterator<Item = f64>| vs.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    if data.is_empty() {
+        return goal.map_or((0.0, 1.0, None, ""), |g| (g - 0.5, g + 0.5, Some(g), ""));
+    }
+    let (dlo, dhi) = span(&mut data.iter().copied());
+    let far = goal.filter(|g| (dhi.max(*g) - dlo.min(*g)) > 5.0 * (dhi - dlo).max(min_span));
+    let (lo, hi) = if far.is_some() { (dlo, dhi) } else { span(&mut data.iter().copied().chain(goal)) };
+    let pad = 0.5_f64.max(0.05 * (hi - lo));
+    let gap = pad.max(0.15 * (hi - lo));
+    let line = goal.map(|g| if far.is_some() { if g < lo { lo - gap } else { hi + gap } } else { g });
+    let arrow = far.map_or("", |g| if g < dlo { " \u{2193}" } else { " \u{2191}" });
+    (line.map_or(lo - pad, |g| g.min(lo - pad)), line.map_or(hi + pad, |g| g.max(hi + pad)), line, arrow)
+}
+
 /// The weight chart's data for `range`: one point per weigh-in day, the raw value and its trend (computed over all history,
-/// then sliced), nothing for the days between. Everything is in the person's unit. The y domain always holds the goal.
+/// then sliced), nothing for the days between. Everything is in the person's unit. The goal line is on the chart, at its
+/// value or, when that would flatten the weigh-ins, on the nearest edge (see [`goal_scale`]).
 pub fn weight_chart(j: &mut Journal, range: BodyRange, today: &str) -> Chart {
     let unit = units_of(j).weight;
     let goal_kg = j.profile().ok().and_then(|p| p.goal_weight_kg);
@@ -727,15 +747,8 @@ pub fn weight_chart(j: &mut Journal, range: BodyRange, today: &str) -> Chart {
     let conv = |kg: f64| goals::in_unit(kg, unit);
     let points: Vec<Point> = inside.iter().map(|&(day, raw, t)| Point { day, raw: Some(conv(raw)), trend: Some(conv(t)) }).collect();
     let table = inside.iter().map(|&(day, raw, t)| ChartRow { date_text: date_long(day, this_year), raw_text: goals::mass_text(raw, unit), trend_text: goals::mass_text(t, unit) }).collect();
-    let goal = goal_kg.map(conv);
-    let shown: Vec<f64> = points.iter().flat_map(|p| [p.raw, p.trend]).flatten().chain(goal).collect();
-    let (lo, hi) = shown.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-    let (y_min, y_max) = if shown.is_empty() {
-        (0.0, 1.0)
-    } else {
-        let pad = 0.5_f64.max(0.05 * (hi - lo));
-        (lo - pad, hi + pad)
-    };
+    let data: Vec<f64> = points.iter().flat_map(|p| [p.raw, p.trend]).flatten().collect();
+    let (y_min, y_max, goal, arrow) = goal_scale(&data, goal_kg.map(conv), conv(1.0));
     let word = mass_word(unit);
     let name = range_name(range);
     let label = match inside.as_slice() {
@@ -754,7 +767,7 @@ pub fn weight_chart(j: &mut Journal, range: BodyRange, today: &str) -> Chart {
         y_min,
         y_max,
         goal,
-        goal_text: goal.map(|g| format!("Goal {} {word}", trimmed1(g))),
+        goal_text: goal_kg.map(|g| format!("Goal {} {word}{arrow}", trimmed1(conv(g)))),
         unit_text: word,
         label,
         table,
@@ -860,7 +873,7 @@ mod tests {
     use std::fs;
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-body-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-body-{}-{}", name, crate::test_pid()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -1234,6 +1247,24 @@ mod tests {
         let c = weight_chart(&mut j, BodyRange::M3, TODAY);
         assert!((c.points[0].raw.unwrap() - 78.9 / goals::KG_PER_LB).abs() < 1e-9);
         assert_eq!((c.unit_text, c.goal_text.as_deref()), ("lb", Some("Goal 163.1 lb")));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_far_goal_sits_on_the_edge_of_the_weight_chart() {
+        let d = tdir("chart-far-goal");
+        let mut j = Journal::open(d.clone());
+        j.profile_mut().unwrap().goal_weight_kg = Some(65.0);
+        set_value(&mut j, TODAY, TODAY, "weight", 80.0, 1).unwrap();
+        let c = weight_chart(&mut j, BodyRange::M3, TODAY);
+        // 15 kg below a single weigh-in: the scale fits the weigh-in, the line sits on the bottom edge and says where the goal is
+        assert!(c.y_min > 78.0, "the scale fits 80 kg, not the 65 kg goal: {}", c.y_min);
+        assert_eq!(c.goal, Some(c.y_min));
+        assert_eq!(c.goal_text.as_deref(), Some("Goal 65 kg \u{2193}"));
+        // a goal above, as far off: the top edge, pointing up
+        j.profile_mut().unwrap().goal_weight_kg = Some(95.0);
+        let c = weight_chart(&mut j, BodyRange::M3, TODAY);
+        assert_eq!((c.goal, c.goal_text.as_deref()), (Some(c.y_max), Some("Goal 95 kg \u{2191}")));
         let _ = fs::remove_dir_all(&d);
     }
 

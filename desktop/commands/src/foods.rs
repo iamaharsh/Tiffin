@@ -11,22 +11,22 @@ use std::sync::Mutex;
 use crate::Shared;
 
 /// Online search state: the send limiter, the hits of the last search and the cache of opened products. Managed beside `Shared`, never inside it.
-pub(crate) struct Off {
-    pub(crate) limiter: off::Limiter,
-    pub(crate) hits: Vec<OnlineFood>,
-    pub(crate) cache: off::OffCache,
+pub struct Off {
+    pub limiter: off::Limiter,
+    pub hits: Vec<OnlineFood>,
+    pub cache: off::OffCache,
 }
 
-pub(crate) struct OffState(pub(crate) Mutex<Off>);
+pub struct OffState(pub Mutex<Off>);
 
 impl OffState {
-    pub(crate) fn new(data_dir: &Path) -> OffState {
+    pub fn new(data_dir: &Path) -> OffState {
         OffState(Mutex::new(Off { limiter: off::Limiter::default(), hits: vec![], cache: off::OffCache::open(off::cache_path(data_dir)) }))
     }
 }
 
 /// The cached products, plus the hits of the last online search when asked (a hit replaces its cached copy).
-pub(crate) fn online_foods(off: &OffState, with_hits: bool) -> Vec<OnlineFood> {
+pub fn online_foods(off: &OffState, with_hits: bool) -> Vec<OnlineFood> {
     let o = off.0.lock().unwrap();
     let mut out = if with_hits { o.hits.clone() } else { vec![] };
     let seen: Vec<String> = out.iter().map(|f| f.code.clone()).collect();
@@ -46,20 +46,18 @@ fn open_online(off: &OffState, code: &str) -> Result<(), String> {
 }
 
 /// Opening an online result keeps it in the local cache so later searches find it offline.
-#[tauri::command]
-pub(crate) fn off_open(off: tauri::State<OffState>, code: String) -> Result<(), String> {
+pub fn off_open(off: &OffState, code: String) -> Result<(), String> {
     open_online(&off, &code)
 }
 
 /// An online food turned into a My Food draft; `ready` is false when its values need a look first. Saving stays with `save_my_food`.
 #[derive(Serialize)]
-pub(crate) struct OnlineDraft {
+pub struct OnlineDraft {
     food: MyFood,
     ready: bool,
 }
 
-#[tauri::command]
-pub(crate) fn online_food_draft(off: tauri::State<OffState>, code: String) -> Result<OnlineDraft, String> {
+pub fn online_food_draft(off: &OffState, code: String) -> Result<OnlineDraft, String> {
     let (food, ready) = off::as_my_food(&find_online(&off, &code)?);
     Ok(OnlineDraft { food, ready })
 }
@@ -69,12 +67,12 @@ fn recipe_food(r: &Recipe) -> RecipeFood {
 }
 
 /// The recipes that can be logged as foods: not in the trash, with a uid.
-pub(crate) fn recipe_foods(lib: &Library) -> Vec<RecipeFood> {
+pub fn recipe_foods(lib: &Library) -> Vec<RecipeFood> {
     lib.recipes.iter().filter(|r| !r.in_trash && !r.uid.is_empty()).map(recipe_food).collect()
 }
 
 /// A recipe opened as a food. Takes the library, so a journal write can use it under its own lock.
-pub(crate) fn recipe_detail_in(lib: &Library, uid: &str, us: bool) -> Result<FoodDetail, String> {
+pub fn recipe_detail_in(lib: &Library, uid: &str, us: bool) -> Result<FoodDetail, String> {
     let r = lib.recipes.iter().find(|r| !r.in_trash && r.uid == uid).ok_or(crate::GONE)?;
     // grams are offered only when every ingredient weighs (D-08)
     let serving_g = nutrition::recipe_grams(r).map(|g| g / r.servings_count());
@@ -82,7 +80,7 @@ pub(crate) fn recipe_detail_in(lib: &Library, uid: &str, us: bool) -> Result<Foo
 }
 
 /// Rank the My Foods, recipes and online foods for `q` (each lock is dropped before the next is taken).
-fn rows(shared: &Shared, off: &OffState, q: &str, with_hits: bool) -> Vec<FoodRow> {
+pub fn rows(shared: &Shared, off: &OffState, q: &str, with_hits: bool) -> Vec<FoodRow> {
     let (mine, recipes) = {
         let st = shared.lock().unwrap();
         (st.lib.my_foods.clone(), recipe_foods(&st.lib))
@@ -93,19 +91,19 @@ fn rows(shared: &Shared, off: &OffState, q: &str, with_hits: bool) -> Vec<FoodRo
 
 /// How an online search went. `status` is `ok`, `empty`, `offline`, `slow`, `limited`, `wait` or `needs_email` (nothing was sent: no contact email is saved); the rows are always the local results plus any hits.
 #[derive(Serialize)]
-pub(crate) struct OnlineResult {
-    status: &'static str,
-    retry_in: u64,
-    added: usize,
-    rows: Vec<FoodRow>,
+pub struct OnlineResult {
+    pub status: &'static str,
+    pub retry_in: u64,
+    pub added: usize,
+    pub rows: Vec<FoodRow>,
 }
 
 /// `Some(seconds to wait)` when the limiter or a hard stop refuses a send now; otherwise the send is counted.
-fn begin(off: &OffState, now: u64) -> Option<u64> {
+pub fn begin(off: &OffState, now: u64) -> Option<u64> {
     off.0.lock().unwrap().limiter.allow(now).err()
 }
 
-fn finish(shared: &Shared, off: &OffState, q: &str, answer: off::OffAnswer, now: u64) -> OnlineResult {
+pub fn finish(shared: &Shared, off: &OffState, q: &str, answer: off::OffAnswer, now: u64) -> OnlineResult {
     let (status, retry_in, added) = {
         let mut o = off.0.lock().unwrap();
         match answer {
@@ -132,7 +130,7 @@ fn finish(shared: &Shared, off: &OffState, q: &str, answer: off::OffAnswer, now:
 
 /// The rows for the box on the Foods page, and whether Search Online may be pressed for the same text.
 #[derive(Serialize)]
-pub(crate) struct FoodResults {
+pub struct FoodResults {
     rows: Vec<FoodRow>,
     online_ready: bool,
     /// the query is a barcode's digits, so an empty answer offers the label photo, not a spelling hint
@@ -142,14 +140,13 @@ pub(crate) struct FoodResults {
 }
 
 /// Local search on every keystroke: the bundled foods, My Foods and the cached online products. No network.
-#[tauri::command]
-pub(crate) fn search_foods(state: tauri::State<Shared>, off: tauri::State<OffState>, q: String) -> Result<FoodResults, String> {
+pub fn search_foods(state: &Shared, off: &OffState, q: String) -> Result<FoodResults, String> {
     // the hits of the last online search show only in its own result, so they go when the query changes
     Ok(FoodResults { rows: rows(&state, &off, &q, false), online_ready: off::query_ready(&q), barcode: off::barcode_in(&q).is_some(), code: off::barcode_in(&q).and_then(Result::ok) })
 }
 
 /// Open a food (a row's key) with its units. Looks in the last online hits too, so an opened online row resolves.
-pub(crate) fn detail_of(shared: &Shared, off: &OffState, key: &str, us: bool) -> Result<FoodDetail, String> {
+pub fn detail_of(shared: &Shared, off: &OffState, key: &str, us: bool) -> Result<FoodDetail, String> {
     if let Some(uid) = key.strip_prefix("recipe:") {
         return recipe_detail_in(&shared.lock().unwrap().lib, uid, us);
     }
@@ -163,8 +160,7 @@ pub(crate) fn detail_of(shared: &Shared, off: &OffState, key: &str, us: bool) ->
     foods::detail(key, &mine, &online, us)
 }
 
-#[tauri::command]
-pub(crate) fn food_detail(state: tauri::State<Shared>, off: tauri::State<OffState>, key: String, us: bool) -> Result<FoodDetail, String> {
+pub fn food_detail(state: &Shared, off: &OffState, key: String, us: bool) -> Result<FoodDetail, String> {
     detail_of(&state, &off, &key, us)
 }
 
@@ -173,13 +169,12 @@ fn amount_of(shared: &Shared, off: &OffState, key: &str, amount: Option<f32>, un
     foods::amount(&detail_of(shared, off, key, false)?, amount, unit, from)
 }
 
-#[tauri::command]
-pub(crate) fn food_amount(state: tauri::State<Shared>, off: tauri::State<OffState>, key: String, amount: Option<f32>, unit: String, from: Option<String>) -> Result<Amount, String> {
+pub fn food_amount(state: &Shared, off: &OffState, key: String, amount: Option<f32>, unit: String, from: Option<String>) -> Result<Amount, String> {
     amount_of(&state, &off, &key, amount, &unit, from.as_deref())
 }
 
 /// The crate's preview plus a taken name as a name problem. The rule stays in the crate; the preview is where the form looks for problems.
-pub(crate) fn preview_of(state: &Shared, food: &MyFood) -> foods::Preview {
+pub fn preview_of(state: &Shared, food: &MyFood) -> foods::Preview {
     let mut p = foods::preview(food);
     if p.problem.is_none() && recipe_box::nutrition::check_my_food_name(&state.lock().unwrap().lib, food).is_err() {
         p.problem = Some(foods::FoodProblem { field: "name", message: foods::NAME_TAKEN });
@@ -188,73 +183,20 @@ pub(crate) fn preview_of(state: &Shared, food: &MyFood) -> foods::Preview {
 }
 
 /// The My Food form's live line, warnings and blocking field. Reads the open library and saves nothing.
-#[tauri::command]
-pub(crate) fn food_preview(state: tauri::State<Shared>, food: MyFood) -> Result<foods::Preview, String> {
+pub fn food_preview(state: &Shared, food: MyFood) -> Result<foods::Preview, String> {
     Ok(preview_of(&state, &food))
 }
 
-/// Search Online: one request with only the typed words. The limit is checked here, not only by the button.
-#[tauri::command]
-pub(crate) async fn off_search(state: tauri::State<'_, Shared>, off: tauri::State<'_, OffState>, q: String) -> Result<OnlineResult, String> {
-    if !off::query_ready(&q) {
-        return Err("Type at least two letters to search online.".into());
-    }
-    // a barcode is looked up as one product; digits that don't add up are refused before anything is sent
-    let barcode = match off::barcode_in(&q) {
-        Some(Err(_)) => return Ok(OnlineResult { status: "bad_barcode", retry_in: 0, added: 0, rows: rows(&state, &off, &q, false) }),
-        Some(Ok(code)) => Some(code),
-        None => None,
-    };
-    // no email, no send: the page asks for one, and the limiter doesn't count a request that never left
-    if off::valid_email(&state.lock().unwrap().lib.settings.off_email).is_err() {
-        return Ok(finish(&state, &off, &q, off::OffAnswer::NeedsEmail, model::now_secs()));
-    }
-    if let Some(wait) = begin(&off, model::now_secs()) {
-        return Ok(OnlineResult { status: "wait", retry_in: wait, added: 0, rows: rows(&state, &off, &q, true) });
-    }
-    let text = q.trim().to_string();
-    let email = state.lock().unwrap().lib.settings.off_email.clone();
-    let answer = tauri::async_runtime::spawn_blocking(move || match barcode {
-        // the code passed barcode_in, so product() can't refuse it; a refusal would read as "slow"
-        Some(code) => off::product(&code, &email).unwrap_or(off::OffAnswer::Slow),
-        None => off::search(&text, &email),
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(named(finish(&state, &off, &q, answer, model::now_secs()), off::barcode_in(&q).is_some()))
-}
-
 /// A barcode the service doesn't list is its own answer, so the page can offer the label photo next.
-fn named(mut r: OnlineResult, barcode: bool) -> OnlineResult {
+pub fn named(mut r: OnlineResult, barcode: bool) -> OnlineResult {
     if barcode && r.status == "empty" {
         r.status = "no_product";
     }
     r
 }
 
-/// A photo of a product's barcode (raw bytes) → the code printed on it, or `None` when none can be read. Offline.
-#[tauri::command]
-pub(crate) async fn barcode_photo(request: tauri::ipc::Request<'_>) -> Result<Option<String>, String> {
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("No picture was sent.".into());
-    };
-    // one file per call, so two scans at once can't read each other's picture
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!("recipebox-barcode-in-{}-{stamp}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    let res = tauri::async_runtime::spawn_blocking({
-        let tmp = tmp.clone();
-        move || recipe_box::labels::barcode_from_photo(&tmp)
-    })
-    .await
-    .map_err(|e| e.to_string());
-    let _ = std::fs::remove_file(&tmp);
-    res?
-}
-
 /// Save, change or clear (empty) the contact email Open Food Facts is told about. The rule is `off::valid_email`; the error is its message.
-#[tauri::command]
-pub(crate) fn set_off_email(state: tauri::State<Shared>, email: String) -> Result<(), String> {
+pub fn set_off_email(state: &Shared, email: String) -> Result<(), String> {
     set_email(&state, &email)
 }
 
@@ -272,7 +214,7 @@ mod tests {
     use recipe_box::model::{MyFood, Nutrients};
 
     fn tdir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rb-desktop-foods-{}-{}", name, std::process::id()));
+        let d = crate::scratch_dir().join(format!("rb-desktop-foods-{}-{}", name, crate::test_pid()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

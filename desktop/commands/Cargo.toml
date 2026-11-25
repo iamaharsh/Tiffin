@@ -1,0 +1,21 @@
+[package]
+name = "tiffin-commands"
+version = "0.1.0"
+edition = "2021"
+description = "The commands Tiffin's screens call, shared by the desktop window (Tauri) and the web version (WebAssembly)."
+publish = false
+
+[dependencies]
+# default-features off: the desktop shell turns `native` on through its own dependency on recipe_box
+recipe_box = { path = "../../app", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.12.5", optional = true }
+
+# the mock runtime, to call the generated Tauri commands the way the window does (not for the web build's tests)
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tauri = { version = "2.12.5", features = ["test"] }
+
+[features]
+# the desktop build: each listed command is also a Tauri command
+tauri = ["dep:tauri"]

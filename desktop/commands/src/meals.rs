@@ -6,7 +6,7 @@ use recipe_box::tracker::diary;
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub(crate) struct MealOut {
+pub struct MealOut {
     #[serde(flatten)]
     meal: Meal,
     label: Option<usize>,
@@ -17,8 +17,7 @@ pub(crate) struct MealOut {
 }
 
 /// Meals between two days (inclusive), with what the page needs to draw each recipe.
-#[tauri::command]
-pub(crate) fn meals(state: tauri::State<Shared>, from: i32, to: i32) -> Vec<MealOut> {
+pub fn meals(state: &Shared, from: i32, to: i32) -> Result<Vec<MealOut>, String> {
     let mut guard = state.lock().unwrap();
     let st = &mut *guard;
     let lib = &st.lib;
@@ -38,19 +37,18 @@ pub(crate) fn meals(state: tauri::State<Shared>, from: i32, to: i32) -> Vec<Meal
         })
         .collect();
     v.sort_by_key(|m| (m.meal.day, m.meal.kind as u8, m.meal.id));
-    v
+    Ok(v)
 }
 
 /// The first meal of the day that's still free (the classic app's choice for a recipe dropped
 /// on a day), or a snack when all four are taken.
-pub(crate) fn free_kind(meals: &[Meal], day: i32) -> MealType {
+pub fn free_kind(meals: &[Meal], day: i32) -> MealType {
     MealType::ALL.iter().copied().find(|k| !meals.iter().any(|m| m.day == day && m.kind == *k)).unwrap_or(MealType::Snack)
 }
 
 /// Move a meal to another day and/or make it another meal.
-#[tauri::command]
-pub(crate) fn update_meal(state: tauri::State<Shared>, id: u64, day: Option<i32>, kind: Option<MealType>) -> Result<(), String> {
-    mutate(&state, |st| {
+pub fn update_meal(state: &Shared, id: u64, day: Option<i32>, kind: Option<MealType>) -> Result<(), String> {
+    mutate(state, |st| {
         let m = st.lib.meals.iter_mut().find(|m| m.id == id).ok_or("That meal isn't in the plan any more.")?;
         if let Some(d) = day {
             m.day = d;
@@ -65,9 +63,8 @@ pub(crate) fn update_meal(state: tauri::State<Shared>, id: u64, day: Option<i32>
 
 /// Take meals off the plan: one by id, or every meal between two days (a Version History
 /// snapshot is taken first for that). Returns what went, so Undo can put it back.
-#[tauri::command]
-pub(crate) fn remove_meals(state: tauri::State<Shared>, ids: Vec<u64>, from: Option<i32>, to: Option<i32>) -> Result<Vec<Meal>, String> {
-    mutate(&state, |st| {
+pub fn remove_meals(state: &Shared, ids: Vec<u64>, from: Option<i32>, to: Option<i32>) -> Result<Vec<Meal>, String> {
+    mutate(state, |st| {
         let range = from.zip(to);
         if range.is_some() {
             st.store.snapshot(&st.lib, "before clearing meals")?;
@@ -80,9 +77,8 @@ pub(crate) fn remove_meals(state: tauri::State<Shared>, ids: Vec<u64>, from: Opt
 }
 
 /// Undo for a removal: the meals go back as they were.
-#[tauri::command]
-pub(crate) fn restore_meals(state: tauri::State<Shared>, meals: Vec<Meal>) -> Result<(), String> {
-    mutate(&state, |st| {
+pub fn restore_meals(state: &Shared, meals: Vec<Meal>) -> Result<(), String> {
+    mutate(state, |st| {
         let t = model::now_secs();
         for mut m in meals {
             if st.lib.meals.iter().any(|x| x.id == m.id) {

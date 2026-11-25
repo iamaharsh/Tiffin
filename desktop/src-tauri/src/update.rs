@@ -117,6 +117,20 @@ mod tests {
         assert_eq!(short_version("1.0.0"), "1.0");
     }
 
+    /// UPD-04: a download whose signature check fails is refused with the security-check message, never a raw error.
+    // shortcut: built only on MSVC (the release workflow's windows-latest runs it before every release): calling reason()
+    // links the updater's error code, and on the windows-gnu toolchain that test exe then fails to load (0xc0000139).
+    // The wrong-key case (E::Minisign) and E::Base64 need the minisign-verify and base64 crates to build their errors; they
+    // share the match line. Drop the cfg once local tests run on MSVC, and add those two cases if the crates can be dev-deps.
+    #[cfg(target_env = "msvc")]
+    #[test]
+    fn a_failed_signature_check_says_so() {
+        use tauri_plugin_updater::Error as E;
+        assert_eq!(reason(&E::SignatureUtf8("not text".into())), BAD_SIGNATURE);
+        assert_eq!(reason(&E::MissingSignedVersion), BAD_SIGNATURE);
+        assert_eq!(reason(&E::SignedVersionMismatch { signed: "9.9.9".into(), announced: "0.4.0".into() }), BAD_SIGNATURE);
+    }
+
     #[test]
     fn reasons_are_short_and_have_no_paths() {
         let long = format!("failed to open C:\\Users\\x\\AppData\\file.exe {}", "word ".repeat(80));
