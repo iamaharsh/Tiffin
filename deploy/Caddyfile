@@ -5,8 +5,7 @@
 #   TIFFIN_DOMAIN        (default: tiffin.fyi)
 #   TIFFIN_HELPER_DOMAIN (default: helper.tiffin.fyi)
 #
-# HSTS rollout note: starts at max-age=300 so a DNS/TLS misconfiguration never locks out visitors.
-# Once HTTPS is verified in production, raise to: max-age=31536000; includeSubDomains
+# HSTS is set to 1 year (max-age=31536000; includeSubDomains); for a brand-new domain, test TLS first with 300.
 
 {
 	# Keep startup/ACME/TLS logs, but never write request URIs (?url=, ?q=, &email=) or client IPs
@@ -44,7 +43,7 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		Strict-Transport-Security "max-age=300; includeSubDomains"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
 
 	# Route-specific overrides run before the global "?" fallback defaults below.
@@ -78,7 +77,7 @@
 	}
 
 	header -Server
-	header Strict-Transport-Security "max-age=300; includeSubDomains"
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
 	# When internet-facing, Caddy replaces untrusted incoming X-Forwarded-For with the direct peer IP,
 	# matching TIFFIN_BEHIND_PROXY=1 on tiffin-helper. (If placing another proxy/CDN in front of Caddy,

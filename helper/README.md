@@ -36,7 +36,8 @@ Or without Docker: `cargo build --release --locked --manifest-path helper/Cargo.
 |---|---|---|
 | `TIFFIN_HELPER_ADDR` | `0.0.0.0:8787` | Where it listens |
 | `TIFFIN_ORIGIN` | `https://tiffin.fyi` | The web app's address. Separate several with commas, e.g. `https://tiffin.fyi,http://localhost:5173` while developing |
-| `TIFFIN_BEHIND_PROXY` | off | Set it to `1` only behind a reverse proxy that sets `X-Forwarded-For`. The helper then counts limits for the last address in that header |
+| `TIFFIN_BEHIND_PROXY` | off | Set it to `1` only behind a reverse proxy that sets the visitor IP header. By default the helper counts limits for the last address in `X-Forwarded-For` |
+| `TIFFIN_CLIENT_IP_HEADER` | *(unset)* | Optional single-IP header used when `TIFFIN_BEHIND_PROXY=1`, e.g. `fly-client-ip` on Fly.io (where `X-Forwarded-For` ends with the Fly Proxy IP instead of the visitor) |
 
 ### HTTPS
 

@@ -3,7 +3,7 @@
 //! request is a single fetch through the importer's own download rules, passed straight back.
 
 use axum::extract::{ConnectInfo, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -41,8 +41,11 @@ struct Helper {
     clients: Arc<Mutex<HashMap<IpAddr, Sends>>>,
     /// Open Food Facts said stop (429/503): nobody's search is sent before this second.
     off_stopped_until: Arc<Mutex<u64>>,
-    /// Behind a reverse proxy, the client is the last X-Forwarded-For entry (the one the proxy added).
+    /// Behind a reverse proxy, read the client IP from `client_ip_header` (if set, e.g. Fly-Client-IP)
+    /// or the last X-Forwarded-For entry (the one Caddy/nginx added).
     behind_proxy: bool,
+    /// Optional single-IP header set by a trusted edge proxy (e.g. `fly-client-ip` on Fly.io).
+    client_ip_header: Option<HeaderName>,
 }
 
 #[derive(Default)]
@@ -53,16 +56,17 @@ struct Sends {
 
 #[cfg(test)]
 fn app(origins: Vec<String>, at_once: usize) -> Router {
-    router(origins, at_once, false)
+    router(origins, at_once, false, None)
 }
 
-fn router(origins: Vec<String>, at_once: usize, behind_proxy: bool) -> Router {
+fn router(origins: Vec<String>, at_once: usize, behind_proxy: bool, client_ip_header: Option<HeaderName>) -> Router {
     let h = Helper {
         origins: Arc::new(origins),
         slots: Arc::new(Semaphore::new(at_once)),
         clients: Arc::default(),
         off_stopped_until: Arc::default(),
         behind_proxy,
+        client_ip_header,
     };
     Router::new()
         .route("/page", get(page))
@@ -143,13 +147,23 @@ fn off_answer(answer: &OffAnswer) -> Response {
     }
 }
 
-/// Who is asking, for their limits. Behind a proxy, the last X-Forwarded-For entry (the proxy adds it;
-/// earlier ones are whatever the client claimed). An IPv6 client is its /64, since one home gets a whole /64.
+/// Who is asking, for their limits. Behind a proxy, uses `client_ip_header` when configured (e.g.
+/// `fly-client-ip` on Fly.io, where X-Forwarded-For ends with the Fly Proxy IP) or otherwise the last
+/// X-Forwarded-For entry (the one Caddy/nginx added; earlier ones are whatever the client claimed).
+/// An IPv6 client is its /64, since one home gets a whole /64.
 fn client(h: &Helper, peer: SocketAddr, hd: &HeaderMap) -> IpAddr {
+    let parse_ip = |s: &str| {
+        let trimmed = s.trim();
+        trimmed.parse::<SocketAddr>().map(|a| a.ip()).or_else(|_| trimmed.parse::<IpAddr>()).ok()
+    };
     let forwarded = || {
-        let last = hd.get_all("x-forwarded-for").iter().last()?.to_str().ok()?.rsplit(',').next()?.trim();
+        if let Some(ref name) = h.client_ip_header {
+            let val = hd.get_all(name).iter().last()?.to_str().ok()?;
+            return parse_ip(val);
+        }
+        let last = hd.get_all("x-forwarded-for").iter().last()?.to_str().ok()?.rsplit(',').next()?;
         // some proxies add the port: "1.2.3.4:567", "[2001:db8::1]:80"
-        last.parse::<SocketAddr>().map(|a| a.ip()).or_else(|_| last.parse::<IpAddr>()).ok()
+        parse_ip(last)
     };
     let ip = if h.behind_proxy { forwarded().unwrap_or(peer.ip()) } else { peer.ip() };
     match ip {
@@ -232,11 +246,38 @@ fn origins_from(v: Option<String>) -> Vec<String> {
     v.unwrap_or_else(|| "https://tiffin.fyi".into()).split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect()
 }
 
+/// TIFFIN_CLIENT_IP_HEADER: optional single-IP header name (e.g. "fly-client-ip"), trimmed and lowercased.
+/// Rejects "x-forwarded-for" (which is a comma-separated list and already the default when unset).
+fn client_ip_header_from(v: Option<String>) -> Result<Option<HeaderName>, String> {
+    let Some(raw) = v.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw == "x-forwarded-for" {
+        return Err("TIFFIN_CLIENT_IP_HEADER must not be x-forwarded-for (leave it unset to use X-Forwarded-For).".into());
+    }
+    HeaderName::from_bytes(raw.as_bytes()).map(Some).map_err(|_| format!("Invalid TIFFIN_CLIENT_IP_HEADER: {raw:?}"))
+}
+
 #[tokio::main]
 async fn main() {
     let addr = std::env::var("TIFFIN_HELPER_ADDR").unwrap_or_else(|_| "0.0.0.0:8787".into());
     let origins = origins_from(std::env::var("TIFFIN_ORIGIN").ok());
     let behind_proxy = std::env::var("TIFFIN_BEHIND_PROXY").is_ok_and(|v| v == "1");
+    let raw_ip_header = match std::env::var("TIFFIN_CLIENT_IP_HEADER") {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("Invalid TIFFIN_CLIENT_IP_HEADER: not valid UTF-8");
+            std::process::exit(1);
+        }
+    };
+    let client_ip_header = match client_ip_header_from(raw_ip_header) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -245,7 +286,7 @@ async fn main() {
         }
     };
     eprintln!("tiffin-helper listening on {addr} for {}", origins.join(", "));
-    let service = router(origins, AT_ONCE, behind_proxy).into_make_service_with_connect_info::<SocketAddr>();
+    let service = router(origins, AT_ONCE, behind_proxy, client_ip_header).into_make_service_with_connect_info::<SocketAddr>();
     if let Err(e) = axum::serve(listener, service).await {
         eprintln!("tiffin-helper stopped: {e}");
         std::process::exit(1);
@@ -422,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn when_off_says_stop_nobody_is_sent() {
-        let h = Helper { origins: Arc::new(origins_from(None)), slots: Arc::new(Semaphore::new(1)), clients: Arc::default(), off_stopped_until: Arc::default(), behind_proxy: false };
+        let h = Helper { origins: Arc::new(origins_from(None)), slots: Arc::new(Semaphore::new(1)), clients: Arc::default(), off_stopped_until: Arc::default(), behind_proxy: false, client_ip_header: None };
         *h.off_stopped_until.lock().unwrap() = now_secs() + 120;
         let r = off_search(State(h.clone()), ConnectInfo("203.0.113.9:1".parse().unwrap()), [(header::ORIGIN, HeaderValue::from_static("https://tiffin.fyi"))].into_iter().collect(), Query(HashMap::from([("q".into(), "nutella".into())]))).await;
         let body = r.into_body().collect().await.unwrap().to_bytes();
@@ -432,8 +473,10 @@ mod tests {
 
     #[test]
     fn a_client_is_who_connected_unless_a_trusted_proxy_says() {
-        let direct = Helper { origins: Arc::default(), slots: Arc::new(Semaphore::new(1)), clients: Arc::default(), off_stopped_until: Arc::default(), behind_proxy: false };
+        let direct = Helper { origins: Arc::default(), slots: Arc::new(Semaphore::new(1)), clients: Arc::default(), off_stopped_until: Arc::default(), behind_proxy: false, client_ip_header: None };
         let proxied = Helper { behind_proxy: true, ..direct.clone() };
+        let fly = Helper { behind_proxy: true, client_ip_header: Some(HeaderName::from_static("fly-client-ip")), ..direct.clone() };
+        let direct_with_hdr = Helper { behind_proxy: false, ..fly.clone() };
         let peer: SocketAddr = "10.0.0.2:1".parse().unwrap();
         let fwd = |v: &str| -> HeaderMap { [(HeaderName::from_static("x-forwarded-for"), HeaderValue::from_str(v).unwrap())].into_iter().collect() };
         // without a proxy the header is the client's own claim, so it is ignored
@@ -447,6 +490,31 @@ mod tests {
         let two: HeaderMap = [("x-forwarded-for", "8.8.8.8"), ("x-forwarded-for", "198.51.100.7")].into_iter().map(|(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v))).collect();
         assert_eq!(client(&proxied, peer, &two), "198.51.100.7".parse::<IpAddr>().unwrap());
         assert_eq!(client(&proxied, peer, &HeaderMap::new()), "10.0.0.2".parse::<IpAddr>().unwrap());
+        // Fly.io: Fly-Client-IP carries the real visitor while X-Forwarded-For ends with Fly's edge IP
+        let fly_hd: HeaderMap = [("x-forwarded-for", "198.51.100.42, 66.241.124.1"), ("fly-client-ip", "198.51.100.42")]
+            .into_iter()
+            .map(|(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+            .collect();
+        assert_eq!(client(&fly, peer, &fly_hd), "198.51.100.42".parse::<IpAddr>().unwrap());
+        // without TIFFIN_BEHIND_PROXY=1, Fly-Client-IP is ignored too
+        assert_eq!(client(&direct_with_hdr, peer, &fly_hd), "10.0.0.2".parse::<IpAddr>().unwrap());
+        // IPv6 in Fly-Client-IP still masks to /64; missing, malformed, or comma-list falls back to peer
+        let fly_v6: HeaderMap = [(HeaderName::from_static("fly-client-ip"), HeaderValue::from_static("2001:db8:9:a:dead::beef"))].into_iter().collect();
+        assert_eq!(client(&fly, peer, &fly_v6), "2001:db8:9:a::".parse::<IpAddr>().unwrap());
+        assert_eq!(client(&fly, peer, &fwd("198.51.100.7")), "10.0.0.2".parse::<IpAddr>().unwrap());
+        let fly_bad: HeaderMap = [(HeaderName::from_static("fly-client-ip"), HeaderValue::from_static("1.1.1.1, 198.51.100.42"))].into_iter().collect();
+        assert_eq!(client(&fly, peer, &fly_bad), "10.0.0.2".parse::<IpAddr>().unwrap());
+        let fly_dup: HeaderMap = [("fly-client-ip", "1.1.1.1"), ("fly-client-ip", "198.51.100.42")]
+            .into_iter()
+            .map(|(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+            .collect();
+        assert_eq!(client(&fly, peer, &fly_dup), "198.51.100.42".parse::<IpAddr>().unwrap());
+        // header-name parser trims/lowercases and rejects invalid names or x-forwarded-for
+        assert_eq!(client_ip_header_from(None).unwrap(), None);
+        assert_eq!(client_ip_header_from(Some(" Fly-Client-IP ".into())).unwrap(), Some(HeaderName::from_static("fly-client-ip")));
+        assert_eq!(client_ip_header_from(Some("  ".into())).unwrap(), None);
+        assert!(client_ip_header_from(Some("bad header".into())).is_err());
+        assert!(client_ip_header_from(Some("X-Forwarded-For".into())).is_err());
         // one home's IPv6 /64 is one client; a mapped IPv4 address is that IPv4 client
         let six = |a: &str| client(&direct, SocketAddr::new(a.parse().unwrap(), 1), &HeaderMap::new());
         assert_eq!(six("2001:db8:1:2:aaaa::1"), six("2001:db8:1:2:bbbb::9"));

@@ -107,7 +107,7 @@ if (headersTxt) {
   check(rootLines.includes('X-Content-Type-Options: nosniff'), '_headers /* sets X-Content-Type-Options nosniff');
   check(rootLines.includes('X-Frame-Options: DENY'), '_headers /* sets X-Frame-Options DENY');
   check(rootLines.includes('Referrer-Policy: no-referrer'), '_headers /* sets Referrer-Policy no-referrer');
-  check(rootLines.some((l) => l.startsWith('Strict-Transport-Security:')), '_headers /* sets HSTS');
+  check(rootLines.includes('Strict-Transport-Security: max-age=31536000; includeSubDomains'), '_headers /* sets 1-year HSTS');
   check(rootLines.includes('Cache-Control: no-cache'), '_headers /* sets Cache-Control no-cache by default');
   check(
     rootLines.includes('Permissions-Policy: camera=(self), screen-wake-lock=(self), microphone=(), geolocation=(), payment=(), usb=()'),
@@ -198,7 +198,8 @@ if (caddyTxt) {
   check(caddyTxt.includes('X-Content-Type-Options "nosniff"'), 'Caddyfile sets X-Content-Type-Options nosniff');
   check(caddyTxt.includes('X-Frame-Options "DENY"'), 'Caddyfile sets X-Frame-Options DENY');
   check(caddyTxt.includes('Referrer-Policy "no-referrer"'), 'Caddyfile sets Referrer-Policy no-referrer');
-  check(caddyTxt.includes('Strict-Transport-Security "max-age='), 'Caddyfile sets HSTS');
+  const hstsCount = (caddyTxt.match(/Strict-Transport-Security "max-age=31536000; includeSubDomains"/g) ?? []).length;
+  check(hstsCount >= 2, `Caddyfile sets 1-year HSTS in both site blocks (found ${hstsCount})`);
   check(caddyTxt.includes('header @assets Cache-Control "public, max-age=31536000, immutable"'), 'Caddyfile sets immutable Cache-Control for /assets/*');
   check(caddyTxt.includes('?Cache-Control "no-cache"'), 'Caddyfile uses ?Cache-Control fallback so @assets is not overwritten');
   check(caddyTxt.includes('?Permissions-Policy "camera=(self), screen-wake-lock=(self), microphone=(), geolocation=(), payment=(), usb=()"'), 'Caddyfile uses ?Permissions-Policy fallback');

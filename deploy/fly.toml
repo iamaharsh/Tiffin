@@ -1,0 +1,33 @@
+# Fly.io configuration for tiffin-helper (stateless recipe/OFF proxy for tiffin.fyi).
+# Always deploy from a clean release snapshot (e.g. a clone of iamaharsh/Tiffin main, which carries
+# the redistributable MET stand-in) from the repository root:
+#   fly deploy . --config deploy/fly.toml --ha=false
+
+app = "tiffin-helper"
+primary_region = "sea"
+
+[build]
+  dockerfile = "helper/Dockerfile"
+
+[env]
+  TIFFIN_HELPER_ADDR = "0.0.0.0:8787"
+  TIFFIN_ORIGIN = "https://tiffin.fyi"
+  TIFFIN_BEHIND_PROXY = "1"
+  # Fly Proxy overwrites Fly-Client-IP with the real visitor IP (whereas X-Forwarded-For ends with Fly's edge IP).
+  # Keep Cloudflare DNS for helper.tiffin.fyi set to DNS-only (grey cloud) so Fly Proxy sees the real visitor IP.
+  TIFFIN_CLIENT_IP_HEADER = "fly-client-ip"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.http_options.response.headers]
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

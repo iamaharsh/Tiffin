@@ -47,12 +47,22 @@ wrangler pages deploy desktop/dist-web --project-name tiffin
 - **Headers:** Cloudflare Pages automatically reads `desktop/dist-web/_headers`, applying COOP, COEP, CORP, strict CSP (with an even stricter zero-JS CSP on `/privacy` and `/privacy/*`), `Permissions-Policy`, HSTS, and immutable caching on `/assets/*`.
 - **Custom domain:** attach `tiffin.fyi` (HTTPS automatic).
 
-### `tiffin-helper` container
+### `tiffin-helper` container (Fly.io or any container host)
 
-Run `helper/Dockerfile` on any container host (Fly.io, VPS, etc.) behind HTTPS with:
+A ready-to-use Fly.io config lives at `deploy/fly.toml`. Always deploy from a **clean release snapshot** (e.g. a clone of `iamaharsh/Tiffin` `main`, which carries the redistributable MET stand-in):
+
+```sh
+fly apps create tiffin-helper   # pick a unique name if taken, and match it in deploy/fly.toml
+fly deploy . --config deploy/fly.toml --ha=false
+fly certs add helper.tiffin.fyi --config deploy/fly.toml
+```
+
+Use `--ha=false` so one Machine holds the in-memory rate-limit counters and Open Food Facts backoff window (and keeps idle cost near zero). Then add the `A`/`AAAA` (or `CNAME`) records Fly prints for `helper.tiffin.fyi` in Cloudflare DNS with **Proxy status = DNS only (grey cloud)** so Fly Proxy terminates TLS and populates `Fly-Client-IP` with the real visitor IP (`TIFFIN_CLIENT_IP_HEADER=fly-client-ip`). Note that Fly Proxy does not log normal HTTP requests, though upstream/proxy error logs (e.g., 502/cold-start failures) can briefly record request URLs in Fly's short-term log buffer; moving to the self-hosted Caddy stack below eliminates edge error logging completely.
+
+On another container host behind a reverse proxy, run `helper/Dockerfile` with:
 
 - `TIFFIN_ORIGIN=https://tiffin.fyi`
-- `TIFFIN_BEHIND_PROXY=1` (only when behind a reverse proxy that sets/appends the real visitor IP in `X-Forwarded-For`)
+- `TIFFIN_BEHIND_PROXY=1` (plus `TIFFIN_CLIENT_IP_HEADER=...` if your proxy puts the visitor IP in a dedicated header instead of the last `X-Forwarded-For` entry)
 - **Access and HTTP error logging disabled** (or query strings stripped) at the reverse proxy so `?url=`, `?q=`, and `&email=` are never written to disk logs.
 
 ---
@@ -81,14 +91,14 @@ What this setup guarantees:
 
 ---
 
-## 4. Post-launch verification & HSTS ramp-up
+## 4. Post-launch verification
 
 1. **Headers check:** verify `curl -I https://tiffin.fyi/` returns `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`.
 2. **Privacy page check:** verify `curl -I https://tiffin.fyi/privacy/` returns `200` (no redirect) with `Content-Security-Policy: default-src 'none'; ...` and `Permissions-Policy: camera=(), ...`.
 3. **Immutable assets check:** verify `curl -I` on a file under `https://tiffin.fyi/assets/` returns `Cache-Control: public, max-age=31536000, immutable`.
 4. **Browser check:** open `https://tiffin.fyi/`, confirm `window.crossOriginIsolated === true`, zero CSP/console errors, offline reload works after service worker activation, and Settings → About opens `/privacy/`.
 5. **Helper check:** confirm `https://helper.tiffin.fyi/page?url=https://example.com/` returns `403` without `Origin: https://tiffin.fyi`, and recipe import + Open Food Facts search work from `https://tiffin.fyi/`.
-6. **HSTS ramp-up:** both `_headers` and `deploy/Caddyfile` ship with `Strict-Transport-Security: max-age=300; includeSubDomains`. Once HTTPS is confirmed across both domains, raise `max-age` to `31536000` (1 year).
+6. **HSTS:** both `_headers` and `deploy/Caddyfile` set `Strict-Transport-Security: max-age=31536000; includeSubDomains` (for a brand-new unverified domain, test TLS first with `max-age=300`).
 
 ---
 

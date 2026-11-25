@@ -1,6 +1,6 @@
 [package]
 name = "tiffin"
-version = "0.5.0"
+version = "0.5.1"
 description = "Tiffin: the desktop app (Tauri)"
 edition = "2021"
 

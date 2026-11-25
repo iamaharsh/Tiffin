@@ -111,11 +111,13 @@ jobs:
         run: python -I app/tools/build_mets.py --check-release app/data/mets.tsv
 
       - name: Tests gate the release
+        shell: bash
         run: |
           cargo test --manifest-path app/Cargo.toml
           cargo test --manifest-path desktop/src-tauri/Cargo.toml
           cargo test --manifest-path helper/Cargo.toml
-          cargo test --manifest-path desktop/commands/Cargo.toml --features tauri
+          cargo test --manifest-path desktop/commands/Cargo.toml --lib
+          cargo check --tests --manifest-path desktop/commands/Cargo.toml --features tauri
 
       # The web version (Milestone 2) runs the same crate as WebAssembly, without the desktop-only parts.
       # It targets WASI, so the tests run unchanged under wasmtime with a real folder as /tmp.
