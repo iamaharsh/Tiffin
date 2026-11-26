@@ -2,7 +2,7 @@
 
 Tiffin on the web consists of two small pieces with zero databases and zero user accounts:
 
-1. **Static site (`desktop/dist-web`)** — the Svelte UI, WebAssembly engine (`tiffin.wasm`), offline PWA service worker (`sw.js`), standalone privacy page (`/privacy/`), and Cloudflare Pages `_headers`.
+1. **Static site (`desktop/dist-web`)** — the Svelte UI, WebAssembly engine (`tiffin.wasm`), offline PWA service worker (`sw.js`), standalone privacy page (`/privacy/`), and Cloudflare `_headers`.
 2. **`tiffin-helper` (`helper/`)** — one stateless Rust binary that proxies recipe pages, recipe photos, and Open Food Facts name searches while enforcing public-web-only SSRF rules.
 
 Everything runs offline on the visitor's device once loaded. The static site **must** be served over HTTPS with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` so OPFS saves atomically via `SharedArrayBuffer` (plain GitHub Pages cannot set custom response headers).
@@ -34,18 +34,22 @@ npm run check:web
 
 ---
 
-## 2. Option A — First host: Cloudflare Pages + container host for `tiffin-helper`
+## 2. Option A — First host: Cloudflare Workers Static Assets + container host for `tiffin-helper`
 
-### Static site on Cloudflare Pages
+### Static site on Cloudflare Workers Static Assets
 
-Because `tiffin.wasm` is compiled with `rustup` + `wasm32-wasip1` (not installed in Cloudflare Pages' default build image), build `desktop/dist-web` locally or in CI as in Step 1 and deploy the output folder directly:
+Because `tiffin.wasm` is compiled with `rustup` + `wasm32-wasip1`, build `desktop/dist-web` in CI or locally as in Step 1 and deploy with `deploy/wrangler.json`:
+
+- **Automatic deploy on every release tag (recommended):** the `web-bundle` job in `.github/workflows/release.yml` automatically deploys `desktop/dist-web` to the `tiffin` Worker via `deploy/wrangler.json` once `CLOUDFLARE_API_TOKEN` (scoped to Account → **Workers Scripts: Edit**) and `CLOUDFLARE_ACCOUNT_ID` are set as repository secrets, and only after the MET stand-in check, release WASM build, `npm run check`, `npm run build:web`, `npm run check:web`, and Caddy validation all pass.
+- **Manual one-command deploy from a clean release snapshot:**
 
 ```sh
-wrangler pages deploy desktop/dist-web --project-name tiffin
+npx wrangler login   # once
+npx wrangler deploy --config deploy/wrangler.json
 ```
 
-- **Headers:** Cloudflare Pages automatically reads `desktop/dist-web/_headers`, applying COOP, COEP, CORP, strict CSP (with an even stricter zero-JS CSP on `/privacy` and `/privacy/*`), `Permissions-Policy`, HSTS, and immutable caching on `/assets/*`.
-- **Custom domain:** attach `tiffin.fyi` (HTTPS automatic).
+- **Headers:** Cloudflare Workers Static Assets automatically reads `desktop/dist-web/_headers`, applying COOP, COEP, CORP, strict CSP (with an even stricter zero-JS CSP on `/privacy` and `/privacy/*`), `Permissions-Policy`, HSTS, and immutable caching on `/assets/*`, while blocking `/_headers` with `404`.
+- **Custom domain:** attach `tiffin.fyi` to the `tiffin` Worker in the Cloudflare dashboard (`deploy/wrangler.json` intentionally omits `routes` so dashboard-managed custom domains stay intact, and disables `workers_dev` and `preview_urls`).
 
 ### `tiffin-helper` container (Fly.io or any container host)
 
@@ -104,5 +108,5 @@ What this setup guarantees:
 
 ## 5. Rollback
 
-- **Cloudflare Pages:** roll back to the previous deployment in the Cloudflare Pages dashboard (< 1 minute).
+- **Cloudflare Workers:** roll back to the previous deployment in **Cloudflare Dashboard → Workers & Pages → `tiffin` → Deployments** (or run `npx wrangler rollback --config deploy/wrangler.json`, < 1 minute).
 - **Self-hosted server:** replace `desktop/dist-web` with the previous build snapshot and `docker compose -f deploy/docker-compose.yml up -d`. Because each deploy's service worker uses an immutable content-hashed cache (`tiffin-shell-<hash>`), browsers pick up the previous build cleanly on next tab launch without corrupting user data in OPFS.

@@ -560,9 +560,52 @@ impl Store {
             return Ok(());
         }
         let t = now_secs();
-        self.last_snapshot = t;
         let snap = Snapshot { taken: t, reason: reason.into(), library: lib.clone() };
         let text = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
+        self.write_snapshot_file(t, &text)?;
+        self.last_snapshot = t;
+        self.prune(lib.settings.snapshots_to_keep.max(5));
+        Ok(())
+    }
+
+    /// Back up a library saved by a newer version directly from disk (as raw JSON, never through the
+    /// older `Library` struct, so newer fields and hidden items survive intact). Only valid when
+    /// `self.problem` is `Some(Problem::TooNew { .. })`. Leaves `library.json` / `.bak` untouched and
+    /// does not prune existing history snapshots.
+    pub fn snapshot_newer(&mut self, reason: &str) -> Result<(), String> {
+        if !matches!(self.problem, Some(Problem::TooNew { .. })) {
+            return Err("Library is not from a newer version.".into());
+        }
+        let main = library_path(&self.dir);
+        let bak = main.with_extension("json.bak");
+        let parse_newer = |bytes: Vec<u8>| -> Option<serde_json::Value> {
+            let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            let fmt = v.as_object()?.get("format")?.as_u64().and_then(|n| u32::try_from(n).ok())?;
+            (fmt > LIBRARY_FORMAT).then_some(v)
+        };
+        let library = match fs::read(&main) {
+            Ok(bytes) => match parse_newer(bytes) {
+                Some(v) => v,
+                // Fall back to .bak only when `main` was already corrupt and quarantined at load.
+                None if self.copied.is_some() && self.copied == stamp_of(&main) => fs::read(&bak)
+                    .ok()
+                    .and_then(parse_newer)
+                    .ok_or_else(|| "Couldn't read the newer library file.".to_string())?,
+                None => return Err("The newer library file changed or is no longer readable.".into()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::read(&bak)
+                .ok()
+                .and_then(parse_newer)
+                .ok_or_else(|| "Couldn't read the newer library file.".to_string())?,
+            Err(e) => return Err(format!("Couldn't read the newer library file: {e}")),
+        };
+        let t = now_secs();
+        let snap = RawSnapshot { taken: t, reason, library };
+        let text = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
+        self.write_snapshot_file(t, &text)
+    }
+
+    fn write_snapshot_file(&self, t: u64, text: &str) -> Result<(), String> {
         let dir = history_dir(&self.dir);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         // never overwrite a snapshot: a second one in the same second gets -1, -2, ...
@@ -573,9 +616,7 @@ impl Store {
             }
             path = dir.join(format!("snapshot-{}-{}.json", t, n));
         }
-        write_atomic(&path, text.as_bytes(), false)?;
-        self.prune(lib.settings.snapshots_to_keep.max(5));
-        Ok(())
+        write_atomic(&path, text.as_bytes(), false)
     }
 
     /// A snapshot, unless one was taken in the last `within` seconds (for small, frequent
@@ -627,6 +668,13 @@ struct Snapshot {
     taken: u64,
     reason: String,
     library: Library,
+}
+
+#[derive(Serialize)]
+struct RawSnapshot<'a> {
+    taken: u64,
+    reason: &'a str,
+    library: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -1720,6 +1768,140 @@ mod tests {
         assert_eq!(lib.recipes.len(), 1);
         assert_eq!(fs::read(shared.join(SYNC_FILE)).unwrap(), before);
         assert!(!d.join("history").exists() && !main_of(&d).exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn snapshot_newer_preserves_raw_json_without_touching_library() {
+        // 1. Newer library.json (partial: true) is snapshotted losslessly as raw JSON without modifying library.json or pruning >50 history files,
+        //    and two calls in the same second never overwrite each other.
+        let d = tdir("snapnewer");
+        let mut init = Store::new(d.clone(), false);
+        let mut seed = good(1);
+        seed.settings.snapshots_to_keep = 60;
+        for i in 0..55 {
+            init.snapshot(&seed, &format!("old {i}")).unwrap();
+        }
+        assert_eq!(fs::read_dir(d.join("history")).unwrap().count(), 55);
+        fs::write(main_of(&d), newer_text()).unwrap();
+        let before_lib = fs::read(main_of(&d)).unwrap();
+        let mut st = Store::new(d.clone(), false);
+        assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+        assert_eq!(st.problem, Some(Problem::TooNew { found: "9.0.0".into(), partial: true }));
+        assert!(!st.can_snapshot());
+        st.snapshot_newer("before update to 9.0.0").unwrap();
+        st.snapshot_newer("before update to 9.0.1").unwrap();
+        assert_eq!(fs::read(main_of(&d)).unwrap(), before_lib, "library.json stays byte-for-byte untouched");
+        assert!(!bak_of(&d).exists());
+        let hist_files: Vec<PathBuf> = fs::read_dir(d.join("history")).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(hist_files.len(), 57, "both raw snapshots added and none of the 55 older ones pruned");
+        let mut found_first = false;
+        let mut found_second = false;
+        for p in &hist_files {
+            let name = p.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with("snapshot-") && name.ends_with(".json"), "{name}");
+            let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+            if v["reason"] == "before update to 9.0.0" {
+                assert!(v["taken"].is_u64());
+                assert_eq!(v["library"]["format"], LIBRARY_FORMAT + 1);
+                assert_eq!(v["library"]["app_version"], "9.0.0");
+                assert_eq!(v["library"]["future_field"]["a"], 1);
+                assert_eq!(v["library"]["meals"][0]["kind"], "Brunch-of-the-future");
+                found_first = true;
+            } else if v["reason"] == "before update to 9.0.1" {
+                assert!(v["taken"].is_u64());
+                found_second = true;
+            }
+        }
+        assert!(found_first && found_second);
+        let _ = fs::remove_dir_all(&d);
+
+        // 2. partial: false (higher format + extra keys that still parse into Library) and library.json preferred over newer .bak
+        let d = tdir("snapnewer-main-wins");
+        let main_newer = format!(r#"{{"format": {}, "app_version": "9.0.0", "future_field": "from-main", "recipes": [{{"id": 1, "name": "Soup"}}]}}"#, LIBRARY_FORMAT + 1);
+        let bak_newer = format!(r#"{{"format": {}, "app_version": "9.0.0", "future_field": "from-bak", "recipes": [{{"id": 1, "name": "Old"}}]}}"#, LIBRARY_FORMAT + 1);
+        fs::write(main_of(&d), &main_newer).unwrap();
+        fs::write(bak_of(&d), &bak_newer).unwrap();
+        let (before_main, before_bak) = (fs::read(main_of(&d)).unwrap(), fs::read(bak_of(&d)).unwrap());
+        let mut st = Store::new(d.clone(), false);
+        assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+        assert_eq!(st.problem, Some(Problem::TooNew { found: "9.0.0".into(), partial: false }));
+        st.snapshot_newer("before update to 9.0.0").unwrap();
+        assert_eq!(fs::read(main_of(&d)).unwrap(), before_main);
+        assert_eq!(fs::read(bak_of(&d)).unwrap(), before_bak);
+        let snap_path = fs::read_dir(d.join("history")).unwrap().flatten().next().unwrap().path();
+        let snap: serde_json::Value = serde_json::from_str(&fs::read_to_string(snap_path).unwrap()).unwrap();
+        assert_eq!(snap["library"]["future_field"], "from-main", "library.json must be preferred over .bak");
+        let _ = fs::remove_dir_all(&d);
+
+        // 3. Missing library.json or already-damaged library.json at load with newer .bak falls back to .bak
+        for (label, write_bad_main) in [("snapnewer-bak-missing", false), ("snapnewer-bak-damaged", true)] {
+            let d = tdir(label);
+            if write_bad_main {
+                fs::write(main_of(&d), "{\"recipes\": [").unwrap();
+            }
+            fs::write(bak_of(&d), newer_text()).unwrap();
+            let before_bak = fs::read(bak_of(&d)).unwrap();
+            let mut st = Store::new(d.clone(), false);
+            assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+            st.snapshot_newer("before update to 9.0.0").unwrap();
+            if !write_bad_main {
+                assert!(!main_of(&d).exists());
+            } else {
+                assert_eq!(fs::read(main_of(&d)).unwrap(), b"{\"recipes\": [");
+            }
+            assert_eq!(fs::read(bak_of(&d)).unwrap(), before_bak);
+            let snap_path = fs::read_dir(d.join("history")).unwrap().flatten().next().unwrap().path();
+            let snap: serde_json::Value = serde_json::from_str(&fs::read_to_string(snap_path).unwrap()).unwrap();
+            assert_eq!(snap["reason"], "before update to 9.0.0");
+            assert_eq!(snap["library"]["future_field"]["a"], 1);
+            let _ = fs::remove_dir_all(&d);
+        }
+
+        // 4. Post-load corruption, replacement with current format, or non-object JSON array MUST fail closed even when a newer .bak exists
+        for (label, replacement) in [
+            ("snapnewer-corrupt-after", "not json".to_string()),
+            ("snapnewer-downgraded-after", serde_json::to_string(&good(1)).unwrap()),
+            ("snapnewer-array-after", format!("[{}, \"9.0.0\"]", LIBRARY_FORMAT + 1)),
+        ] {
+            let d = tdir(label);
+            fs::write(main_of(&d), newer_text()).unwrap();
+            fs::write(bak_of(&d), newer_text()).unwrap();
+            let mut st = Store::new(d.clone(), false);
+            assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+            fs::write(main_of(&d), replacement).unwrap();
+            assert!(st.snapshot_newer("before update to 9.0.0").is_err(), "{label} must not fall back to stale .bak");
+            assert!(!d.join("history").exists(), "{label} must write no snapshot");
+            let _ = fs::remove_dir_all(&d);
+        }
+
+        // 5. Refused when not TooNew (clean or damaged), when file vanishes, or when history/ is unwritable
+        let d = tdir("snapnewer-refuse");
+        let mut clean = Store::new(d.clone(), false);
+        assert!(clean.snapshot_newer("x").is_err());
+        assert!(!d.join("history").exists());
+        fs::write(main_of(&d), "not json").unwrap();
+        let mut dmg = Store::new(d.clone(), false);
+        assert!(matches!(dmg.load(), LoadOutcome::Damaged));
+        assert!(dmg.snapshot_newer("x").is_err());
+        assert!(!d.join("history").exists());
+        let _ = fs::remove_dir_all(&d);
+
+        let d = tdir("snapnewer-gone");
+        fs::write(main_of(&d), newer_text()).unwrap();
+        let mut st = Store::new(d.clone(), false);
+        assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+        fs::remove_file(main_of(&d)).unwrap();
+        assert!(st.snapshot_newer("x").is_err());
+        assert!(!d.join("history").exists());
+        let _ = fs::remove_dir_all(&d);
+
+        let d = tdir("snapnewer-nowrite");
+        fs::write(main_of(&d), newer_text()).unwrap();
+        fs::write(d.join("history"), "blocks history dir").unwrap();
+        let mut st = Store::new(d.clone(), false);
+        assert!(matches!(st.load(), LoadOutcome::TooNew { .. }));
+        assert!(st.snapshot_newer("x").is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

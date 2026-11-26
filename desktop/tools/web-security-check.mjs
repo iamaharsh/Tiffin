@@ -1,6 +1,6 @@
-// Verifies the built web bundle (desktop/dist-web) and self-host deploy config (deploy/Caddyfile,
-// deploy/docker-compose.yml) carry matching strict CSP, COOP/COEP/CORP, Permissions-Policy,
-// privacy page hygiene, and SW precache rules.
+// Verifies the built web bundle (desktop/dist-web) and deploy configs (deploy/Caddyfile,
+// deploy/docker-compose.yml, deploy/wrangler.json) carry matching strict CSP, COOP/COEP/CORP,
+// Permissions-Policy, privacy page hygiene, and SW precache rules.
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -84,8 +84,9 @@ const privacyHtml = read(path.join(distWeb, 'privacy', 'index.html'));
 const manifestTxt = read(path.join(distWeb, 'manifest.webmanifest'));
 const caddyTxt = read(path.join(repoRoot, 'deploy', 'Caddyfile'));
 const composeTxt = read(path.join(repoRoot, 'deploy', 'docker-compose.yml'));
+const wranglerTxt = read(path.join(repoRoot, 'deploy', 'wrangler.json'));
 
-// 1. Cloudflare Pages _headers
+// 1. Cloudflare _headers
 if (headersTxt) {
   const blocks = new Map();
   let currentPath = null;
@@ -225,6 +226,38 @@ if (composeTxt) {
   check(caddySection.includes('read_only: true'), 'docker-compose runs caddy read-only');
   check(caddySection.includes('cap_drop:') && caddySection.includes('- ALL'), 'docker-compose drops all capabilities on caddy');
   check(caddySection.includes('no-new-privileges:true'), 'docker-compose sets no-new-privileges on caddy');
+}
+
+// 6. Cloudflare Workers Static Assets config
+if (wranglerTxt) {
+  let cfg = null;
+  let parsed = false;
+  try {
+    cfg = JSON.parse(wranglerTxt);
+    parsed = true;
+  } catch (e) {
+    check(false, `wrangler.json parses as valid JSON (${e instanceof Error ? e.message : e})`);
+  }
+  if (parsed) {
+    const isObj = cfg !== null && typeof cfg === 'object' && !Array.isArray(cfg);
+    check(isObj, 'wrangler.json root is a JSON object');
+    if (isObj) {
+      check(cfg.name === 'tiffin', `wrangler.json declares Worker name 'tiffin' (found ${JSON.stringify(cfg.name)})`);
+      check(
+        typeof cfg.compatibility_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cfg.compatibility_date),
+        `wrangler.json declares YYYY-MM-DD compatibility_date (${cfg.compatibility_date || 'missing'})`,
+      );
+      check(cfg.workers_dev === false, 'wrangler.json disables workers.dev subdomain');
+      check(cfg.preview_urls === false, 'wrangler.json disables preview URLs');
+      check(
+        cfg.assets?.directory === '../desktop/dist-web' && path.resolve(repoRoot, 'deploy', cfg.assets.directory) === distWeb,
+        'wrangler.json points assets.directory at desktop/dist-web',
+      );
+      check(cfg.assets?.html_handling === 'auto-trailing-slash', 'wrangler.json uses auto-trailing-slash for canonical /privacy/');
+      check(cfg.assets?.not_found_handling === 'none', 'wrangler.json returns 404 on unknown paths and /_headers');
+      check(!('routes' in cfg) && !('route' in cfg), 'wrangler.json omits route/routes so dashboard-attached custom domain stays intact');
+    }
+  }
 }
 
 if (failed > 0) {

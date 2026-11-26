@@ -74,11 +74,17 @@ fn snapshot_first(state: &Shared, version: &str) -> Result<(), String> {
     if st.unsaved {
         return Err(UNSAVED.into());
     }
+    let reason = format!("before update to {version}");
+    // a library saved by a newer version is open read-only, and updating is the only way out:
+    // snapshot the untouched file on disk as raw JSON so no newer fields are lost.
+    if matches!(st.store.problem, Some(recipe_box::storage::Problem::TooNew { .. })) {
+        return st.store.snapshot_newer(&reason).map_err(|_| SNAPSHOT_FAILED.to_string());
+    }
     // no snapshot, no install (the rule itself is the crate's)
     if !st.store.can_snapshot() {
         return Err(SNAPSHOT_FAILED.into());
     }
-    st.store.snapshot(&st.lib, &format!("before update to {version}")).map_err(|_| SNAPSHOT_FAILED.to_string())
+    st.store.snapshot(&st.lib, &reason).map_err(|_| SNAPSHOT_FAILED.to_string())
 }
 
 /// The gate runs after the download, right before the installer, so a failed download leaves no snapshot.
@@ -209,5 +215,83 @@ mod tests {
         let shared = Mutex::new(crate::load_state(tdir("dl-inst")));
         let r = after_download(&shared, "9.9.9", Ok(()), |_| Err(BLOCKED.to_string()));
         assert_eq!(r, Err(BLOCKED.to_string()));
+    }
+
+    #[test]
+    fn too_new_library_snapshots_and_allows_update() {
+        use std::cell::Cell;
+        let newer_partial = format!(
+            r#"{{"format": {}, "app_version": "9.9.9", "future_field": {{"k": 1}}, "recipes": [{{"id": 1, "name": "Soup"}}], "meals": [{{"id": 1, "name": "x", "kind": "FutureMeal"}}]}}"#,
+            recipe_box::model::LIBRARY_FORMAT + 1
+        );
+        let newer_additive = format!(
+            r#"{{"format": {}, "app_version": "9.9.9", "future_field": {{"k": 2}}, "recipes": [{{"id": 1, "name": "Soup"}}]}}"#,
+            recipe_box::model::LIBRARY_FORMAT + 1
+        );
+
+        // TooNew library (both partial: true and partial: false): takes a lossless raw snapshot BEFORE
+        // the installer runs, lets the installer run, and leaves library.json untouched.
+        for (label, text, expect_partial, expect_k) in [
+            ("toonew-partial", &newer_partial, true, 1),
+            ("toonew-additive", &newer_additive, false, 2),
+        ] {
+            let d = tdir(label);
+            std::fs::write(d.join("library.json"), text).unwrap();
+            let before = std::fs::read(d.join("library.json")).unwrap();
+            let shared = Mutex::new(crate::load_state(d.clone()));
+            assert_eq!(
+                shared.lock().unwrap().store.problem,
+                Some(recipe_box::storage::Problem::TooNew { found: "9.9.9".into(), partial: expect_partial })
+            );
+            let ran = Cell::new(false);
+            let d_in = d.clone();
+            let r = after_download(&shared, "9.9.9", Ok(vec![42u8]), |bytes| {
+                assert_eq!(bytes, vec![42u8]);
+                // Snapshot must already exist on disk before the installer runs.
+                let snaps: Vec<_> = std::fs::read_dir(d_in.join("history")).unwrap().flatten().map(|e| e.path()).collect();
+                assert_eq!(snaps.len(), 1);
+                let snap: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&snaps[0]).unwrap()).unwrap();
+                assert_eq!(snap["reason"], "before update to 9.9.9");
+                assert_eq!(snap["library"]["future_field"]["k"], expect_k);
+                if expect_partial {
+                    assert_eq!(snap["library"]["meals"][0]["kind"], "FutureMeal");
+                }
+                ran.set(true);
+                Ok(())
+            });
+            assert_eq!(r, Ok(()));
+            assert!(ran.get());
+            assert_eq!(std::fs::read(d.join("library.json")).unwrap(), before);
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        // TooNew + unsaved page edit: still refused with UNSAVED and no snapshot
+        let d = tdir("toonew-unsaved");
+        std::fs::write(d.join("library.json"), &newer_partial).unwrap();
+        let shared = Mutex::new(crate::load_state(d.clone()));
+        shared.lock().unwrap().unsaved = true;
+        let ran = Cell::new(false);
+        let r = after_download(&shared, "9.9.9", Ok(vec![1u8]), |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Err(UNSAVED.to_string()));
+        assert!(!ran.get());
+        assert!(!d.join("history").exists());
+        let _ = std::fs::remove_dir_all(&d);
+
+        // TooNew + unwritable history folder: still fails closed with SNAPSHOT_FAILED and no install
+        let d = tdir("toonew-nowrite");
+        std::fs::write(d.join("library.json"), &newer_partial).unwrap();
+        std::fs::write(d.join("history"), "blocks the history directory").unwrap();
+        let shared = Mutex::new(crate::load_state(d.clone()));
+        let ran = Cell::new(false);
+        let r = after_download(&shared, "9.9.9", Ok(vec![1u8]), |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Err(SNAPSHOT_FAILED.to_string()));
+        assert!(!ran.get());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

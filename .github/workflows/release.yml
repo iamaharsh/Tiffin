@@ -19,7 +19,7 @@ jobs:
       - name: Helper image builds
         run: docker build -f helper/Dockerfile -t tiffin-helper .
 
-  # The web version's static bundle, release WASM, CSP/headers, and Caddyfile. Never holds back the desktop release.
+  # The web version's static bundle, release WASM, CSP/headers, Caddyfile, and Cloudflare Workers deploy. Never holds back the desktop release.
   web-bundle:
     runs-on: ubuntu-latest
     permissions:
@@ -56,6 +56,32 @@ jobs:
         working-directory: desktop
       - name: Validate self-hosted Caddyfile syntax
         run: docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Check Cloudflare deploy secrets
+        id: cf
+        shell: bash
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CF_TOKEN" ] && [ -n "$CF_ACCOUNT" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CF_TOKEN" ] || [ -n "$CF_ACCOUNT" ]; then
+            echo "::error::Both CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set to deploy to Cloudflare."
+            exit 1
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Cloudflare secrets not configured; skipping Workers deploy."
+          fi
+      - name: Deploy web bundle to Cloudflare Workers
+        if: steps.cf.outputs.ready == 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: npm
+          wranglerVersion: '4.168.0'
+          workingDirectory: deploy
+          command: deploy --config wrangler.json
 
   release:
     runs-on: windows-latest

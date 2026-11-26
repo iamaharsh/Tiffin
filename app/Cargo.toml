@@ -1,6 +1,6 @@
 [package]
 name = "recipe_box"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description = "Tiffin: a desktop recipe manager with a careful importer, safe backups, nutrition and meal planning."
 
