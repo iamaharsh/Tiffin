@@ -4,10 +4,11 @@
 #   fly deploy . --config deploy/fly.toml --ha=false
 
 app = "tiffin-helper"
-primary_region = "sea"
+primary_region = "sjc"
 
 [build]
-  dockerfile = "helper/Dockerfile"
+  # flyctl resolves [build].dockerfile relative to this file's directory (deploy/), while the positional `.` sets the build context to the repo root.
+  dockerfile = "../helper/Dockerfile"
 
 [env]
   TIFFIN_HELPER_ADDR = "0.0.0.0:8787"

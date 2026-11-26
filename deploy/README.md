@@ -57,11 +57,13 @@ A ready-to-use Fly.io config lives at `deploy/fly.toml`. Always deploy from a **
 
 ```sh
 fly apps create tiffin-helper   # pick a unique name if taken, and match it in deploy/fly.toml
+fly ips allocate-v4 --shared --config deploy/fly.toml   # free shared IPv4 (omit --shared only if you want a paid dedicated IPv4)
+fly ips allocate-v6 --config deploy/fly.toml            # free IPv6
 fly deploy . --config deploy/fly.toml --ha=false
 fly certs add helper.tiffin.fyi --config deploy/fly.toml
 ```
 
-Use `--ha=false` so one Machine holds the in-memory rate-limit counters and Open Food Facts backoff window (and keeps idle cost near zero). Then add the `A`/`AAAA` (or `CNAME`) records Fly prints for `helper.tiffin.fyi` in Cloudflare DNS with **Proxy status = DNS only (grey cloud)** so Fly Proxy terminates TLS and populates `Fly-Client-IP` with the real visitor IP (`TIFFIN_CLIENT_IP_HEADER=fly-client-ip`). Note that Fly Proxy does not log normal HTTP requests, though upstream/proxy error logs (e.g., 502/cold-start failures) can briefly record request URLs in Fly's short-term log buffer; moving to the self-hosted Caddy stack below eliminates edge error logging completely.
+Use `--ha=false` so one Machine holds the in-memory rate-limit counters and Open Food Facts backoff window (and keeps idle cost near zero). Apps created with `fly apps create` (instead of `fly launch`) need the two `fly ips allocate-*` lines so `<app>.fly.dev` resolves publicly. Then add the `CNAME` / `A` / `AAAA`, ACME DNS Challenge `CNAME`, and Ownership `TXT` records Fly prints for `helper.tiffin.fyi` (view anytime with `fly certs check helper.tiffin.fyi --config deploy/fly.toml`) in Cloudflare DNS with **Proxy status = DNS only (grey cloud)** so Fly Proxy terminates TLS and populates `Fly-Client-IP` with the real visitor IP (`TIFFIN_CLIENT_IP_HEADER=fly-client-ip`). Note that Fly Proxy does not log normal HTTP requests, though upstream/proxy error logs (e.g., 502/cold-start failures) can briefly record request URLs in Fly's short-term log buffer; moving to the self-hosted Caddy stack below eliminates edge error logging completely.
 
 On another container host behind a reverse proxy, run `helper/Dockerfile` with:
 
